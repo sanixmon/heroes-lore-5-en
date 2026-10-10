@@ -56,7 +56,7 @@ public class MainActivity extends Activity implements GLSurfaceView.Renderer {
             Log.i(TAG, "Storage paths configured: internal=" + internalPath + ", external=" + externalPath);
             if (internalDir != null && !internalDir.exists()) internalDir.mkdirs();
             if (externalDir != null && !externalDir.exists()) externalDir.mkdirs();
-            // Extract libHeroesLore5.so from assets if not already extracted
+            // Extract libHeroesLore5.so and data.vfs.mp3 from assets if not already extracted
             if (internalDir != null) {
                 java.io.File targetSo = new java.io.File(internalDir, "libHeroesLore5.so");
                 if (!targetSo.exists() || targetSo.length() == 0) {
@@ -69,7 +69,22 @@ public class MainActivity extends Activity implements GLSurfaceView.Renderer {
                         }
                         Log.i(TAG, "Extracted libHeroesLore5.so to " + targetSo.getAbsolutePath());
                     } catch (Exception ex) {
-                        Log.w(TAG, "Asset extraction note: " + ex.getMessage());
+                        Log.w(TAG, "Asset extraction note (so): " + ex.getMessage());
+                    }
+                }
+
+                java.io.File targetVfs = new java.io.File(internalDir, "data.vfs.mp3");
+                if (!targetVfs.exists() || targetVfs.length() == 0) {
+                    try (java.io.InputStream in = getAssets().open("data.vfs.mp3");
+                         java.io.FileOutputStream out = new java.io.FileOutputStream(targetVfs)) {
+                        byte[] buf = new byte[32768];
+                        int len;
+                        while ((len = in.read(buf)) > 0) {
+                            out.write(buf, 0, len);
+                        }
+                        Log.i(TAG, "Extracted data.vfs.mp3 to " + targetVfs.getAbsolutePath() + " (" + targetVfs.length() + " bytes)");
+                    } catch (Exception ex) {
+                        Log.w(TAG, "Asset extraction note (vfs): " + ex.getMessage());
                     }
                 }
             }

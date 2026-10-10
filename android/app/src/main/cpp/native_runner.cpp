@@ -13,6 +13,8 @@
 #include <cerrno>
 #include <mutex>
 #include <atomic>
+#include <csignal>
+#include <unistd.h>
 #ifdef __ANDROID__
 #include <android/log.h>
 #define LOG_TAG "HL5_NativeRunner"
@@ -47,6 +49,28 @@ int32_t                g_current_game_substate = -1;
 int32_t                g_current_game_popup = -1;
 bool                   g_engine_ready = false;
 std::string            g_last_frame_status = "Awaiting first frame";
+
+void native_signal_handler(int sig, siginfo_t* info, void* /*context*/) {
+    LOGE("FATAL NATIVE SIGNAL CAUGHT: signal=%d, si_code=%d, fault_addr=%p",
+         sig, info ? info->si_code : 0, info ? info->si_addr : nullptr);
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = SIG_DFL;
+    sigaction(sig, &sa, nullptr);
+    raise(sig);
+}
+
+void install_signal_handlers() {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = native_signal_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGSEGV, &sa, nullptr);
+    sigaction(SIGBUS,  &sa, nullptr);
+    sigaction(SIGFPE,  &sa, nullptr);
+    sigaction(SIGILL,  &sa, nullptr);
+    sigaction(SIGABRT, &sa, nullptr);
+}
 }
 extern "C" {
 
@@ -250,26 +274,28 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnSurfaceCreated(
     jstring internalPathStr,
     jstring externalPathStr) {
     // Runs on GLThread with active EGLContext!
-    LOGI("nativeOnSurfaceCreated entered on GLThread");
+    install_signal_handlers();
+    LOGI("[MILESTONE 1/9] nativeOnSurfaceCreated entered on GLThread");
     g_frame_counter = 0;
     g_engine_ready = false;
 
     // 1. Initialize GLES Bridge with host driver
+    LOGI("[MILESTONE 2/9] Initializing EGL/GLES 1.1 Bridge");
     bool gles_ok = g_gles_bridge.initialize();
     g_gles_bridge.reset_diagnostics();
-    LOGI("GLES Bridge initialization result: %d (provider: %s)", gles_ok, g_gles_bridge.gles_provider_name());
-
-    // 2. Initialize Native ARM32 Unicorn Engine
+    LOGI("[MILESTONE 2/9 RESULT] GLES Bridge result: %d (provider: %s)", gles_ok, g_gles_bridge.gles_provider_name());
+    LOGI("[MILESTONE 3/9] Initializing ARM32 Unicorn CPU Engine");
     if (!g_native_engine.initialize()) {
-        LOGE("Engine initialization failed on GLThread");
+        LOGE("[MILESTONE 3/9 FAIL] Engine initialization failed on GLThread");
         g_last_frame_status = "[FAIL] Engine initialization failed on GLThread";
         return;
     }
-    LOGI("Native ARM32 Unicorn CPU Engine initialized successfully on GLThread");
+    LOGI("[MILESTONE 3/9 PASS] Native ARM32 Unicorn CPU Engine initialized successfully on GLThread");
     // 3. Register GLES hooks
     g_gles_bridge.register_with_engine(g_native_engine);
 
     // 4. Try loading libHeroesLore5.so from candidate locations
+    LOGI("[MILESTONE 4/9] Locating and loading ARM32 guest ELF libHeroesLore5.so");
     const char* int_chars = internalPathStr ? env->GetStringUTFChars(internalPathStr, nullptr) : nullptr;
     std::string internal_so = (int_chars && int_chars[0] != '\0') ? (std::string(int_chars) + "/libHeroesLore5.so") : "";
     if (int_chars) env->ReleaseStringUTFChars(internalPathStr, int_chars);
@@ -287,7 +313,7 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnSurfaceCreated(
             LOGI("Found candidate ELF at: %s, loading...", so_candidates[i]);
             loaded = g_elf_loader.load_so(so_candidates[i], g_native_engine, 0x40000000);
             if (loaded) {
-                LOGI("Successfully loaded and relocated ELF: %s", so_candidates[i]);
+                LOGI("[MILESTONE 4/9 PASS] Successfully loaded and relocated ELF: %s", so_candidates[i]);
                 break;
             } else {
                 LOGE("Failed to load ELF: %s", so_candidates[i]);
@@ -296,6 +322,7 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnSurfaceCreated(
     }
 
     if (loaded) {
+        LOGI("[MILESTONE 5/9] Initializing Game Engine singleton & display states");
         uint32_t make_inst_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager12makeInstanceEv");
         if (make_inst_sym != 0) {
             LOGI("Calling MIDASKernelManager::makeInstance() at 0x%08x", make_inst_sym);
@@ -379,6 +406,9 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnDrawFrame(
     jobject /*thiz*/) {
     // Runs on GLThread with current EGLContext!
     g_frame_counter++;
+    if (g_frame_counter == 1) {
+        LOGI("[MILESTONE 6/9] First game loop frame triggered on GLThread");
+    }
     if (g_engine_ready && g_km_instance != 0) {
         std::lock_guard<std::mutex> lock(g_engine_mutex);
         // Execute recurring frame lifecycle:
@@ -390,6 +420,9 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnDrawFrame(
                 g_native_engine.call_function(loop_sym, {0, 0});
             } else if (update_sym != 0) {
                 g_native_engine.call_function(update_sym, {g_km_instance});
+            }
+            if (g_frame_counter == 1) {
+                LOGI("[MILESTONE 7/9] Successfully executed first guest game-loop tick");
             }
             
             // Query active state from CGame object ([0x40164368])
@@ -416,6 +449,14 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnDrawFrame(
     }
 
     const auto& diag = g_gles_bridge.diagnostics();
+    if (g_frame_counter == 1) {
+        LOGI("[MILESTONE 8/9] First frame rendered: DrawArrays=%u, Ortho=[%.0f, %.0f, %.0f, %.0f]",
+             diag.draw_arrays_calls, diag.last_ortho_left, diag.last_ortho_right,
+             diag.last_ortho_bottom, diag.last_ortho_top);
+    }
+    if (diag.draw_arrays_calls > 0 && g_frame_counter <= 5) {
+        LOGI("[MILESTONE 9/9] Non-empty rendered frame confirmed (total draws: %u)", diag.draw_arrays_calls);
+    }
     char status_buf[512];
     snprintf(status_buf, sizeof(status_buf),
              "HL5 Frame #%llu | GLES Provider: %s\n"
