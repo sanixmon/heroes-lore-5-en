@@ -243,7 +243,12 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnSurfaceCreated(
     g_gles_bridge.register_with_engine(g_native_engine);
 
     // 4. Try loading libHeroesLore5.so from candidate locations
+    const char* int_chars = internalPathStr ? env->GetStringUTFChars(internalPathStr, nullptr) : nullptr;
+    std::string internal_so = (int_chars && int_chars[0] != '\0') ? (std::string(int_chars) + "/libHeroesLore5.so") : "";
+    if (int_chars) env->ReleaseStringUTFChars(internalPathStr, int_chars);
+
     const char* so_candidates[] = {
+        internal_so.empty() ? nullptr : internal_so.c_str(),
         "apktool_modern/lib/armeabi/libHeroesLore5.so",
         "/data/local/tmp/libHeroesLore5.so",
         nullptr
@@ -262,8 +267,30 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnSurfaceCreated(
         if (make_inst_sym != 0) {
             g_km_instance = g_native_engine.call_function(make_inst_sym, {});
         }
-        g_engine_ready = (g_km_instance != 0);
-        g_last_frame_status = g_engine_ready ? "Engine ready on GLThread" : "Singleton allocation failed";
+        if (g_km_instance != 0) {
+            // Set initial screen dimensions (400x240)
+            uint32_t w = static_cast<uint32_t>(g_surface_w);
+            uint32_t h = static_cast<uint32_t>(g_surface_h);
+            g_native_engine.write_memory(g_km_instance + 0x624, &w, 4);
+            g_native_engine.write_memory(g_km_instance + 0x628, &h, 4);
+
+            // Initialize 2D screen GLES states
+            uint32_t init2d_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager12init2DScreenEv");
+            if (init2d_sym != 0) {
+                g_native_engine.call_function(init2d_sym, {g_km_instance});
+            }
+
+            // Create primaryScreen texture and set up vertex buffers
+            uint32_t create_tex_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager14createTexturesEv");
+            if (create_tex_sym != 0) {
+                g_native_engine.call_function(create_tex_sym, {g_km_instance});
+            }
+
+            g_engine_ready = true;
+            g_last_frame_status = "Engine ready, primaryScreen texture created";
+        } else {
+            g_last_frame_status = "Singleton allocation failed";
+        }
     } else {
         g_last_frame_status = "ELF binary not found or failed to load";
     }

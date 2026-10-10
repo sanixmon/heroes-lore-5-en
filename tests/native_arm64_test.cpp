@@ -168,6 +168,25 @@ int main() {
     assert(gles_bridge.diagnostics().last_ortho_bottom == 0.0f);
     assert(gles_bridge.diagnostics().last_ortho_top == 240.0f);
 
+    // 7. Test Actual Drawing Execution via createTextures & updateScreen
+    std::cout << "\n--- Testing Real Engine Drawing Execution (glDrawArrays) ---" << std::endl;
+    uint32_t create_tex_sym = elf_loader.find_symbol("_ZN18MIDASKernelManager14createTexturesEv");
+    assert(create_tex_sym != 0);
+    full_engine.call_function(create_tex_sym, {km_instance});
+    std::cout << "[PASS] createTextures executed: primaryScreen texture allocated." << std::endl;
+
+    uint32_t update_screen_sym = elf_loader.find_symbol("_ZN18MIDASKernelManager12updateScreenEv");
+    assert(update_screen_sym != 0);
+
+    gles_bridge.reset_diagnostics();
+    full_engine.call_function(update_screen_sym, {km_instance});
+    std::cout << "[PASS] updateScreen executed!" << std::endl;
+    std::cout << "[+] GLES Diagnostics during updateScreen:" << std::endl;
+    std::cout << "    Total GLES calls: " << gles_bridge.diagnostics().total_calls << std::endl;
+    std::cout << "    glDrawArrays calls: " << gles_bridge.diagnostics().draw_arrays_calls << std::endl;
+    std::cout << "    Texture binds: " << gles_bridge.diagnostics().bind_texture_calls << std::endl;
+    assert(gles_bridge.diagnostics().draw_arrays_calls >= 3);
+
     std::cout << "\n[PASS] All Native C++ ARM32-on-AArch64 engine tests PASSED 100%!" << std::endl;
     return 0;
 }

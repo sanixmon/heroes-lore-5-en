@@ -45,9 +45,26 @@ public class MainActivity extends Activity implements GLSurfaceView.Renderer {
             java.io.File externalDir = getExternalFilesDir(null);
             internalPath = (internalDir != null) ? internalDir.getAbsolutePath() : "/data/data/" + getPackageName() + "/files";
             externalPath = (externalDir != null) ? externalDir.getAbsolutePath() : internalPath;
-
             if (internalDir != null && !internalDir.exists()) internalDir.mkdirs();
             if (externalDir != null && !externalDir.exists()) externalDir.mkdirs();
+
+            // Extract libHeroesLore5.so from assets if not already extracted
+            if (internalDir != null) {
+                java.io.File targetSo = new java.io.File(internalDir, "libHeroesLore5.so");
+                if (!targetSo.exists() || targetSo.length() == 0) {
+                    try (java.io.InputStream in = getAssets().open("libHeroesLore5.so");
+                         java.io.FileOutputStream out = new java.io.FileOutputStream(targetSo)) {
+                        byte[] buf = new byte[16384];
+                        int len;
+                        while ((len = in.read(buf)) > 0) {
+                            out.write(buf, 0, len);
+                        }
+                        Log.i(TAG, "Extracted libHeroesLore5.so to " + targetSo.getAbsolutePath());
+                    } catch (Exception ex) {
+                        Log.w(TAG, "Asset extraction note: " + ex.getMessage());
+                    }
+                }
+            }
         } catch (Throwable t) {
             Log.e(TAG, "Storage dir init error: " + t.getMessage());
         }
