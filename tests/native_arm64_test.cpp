@@ -256,3 +256,13 @@ int main() {
     std::cout << "\n[PASS] All Native C++ ARM32-on-AArch64 engine tests PASSED 100%!" << std::endl;
     return 0;
 }
+
+#if !defined(__ANDROID__)
+#include <errno.h>
+#include <setjmp.h>
+extern "C" {
+int* __errno(void) { return &errno; }
+int sigsetjmp_compat(sigjmp_buf env, int savesigs) { return __sigsetjmp(env, savesigs); }
+__asm__(".global sigsetjmp\n.type sigsetjmp, %function\nsigsetjmp:\nb __sigsetjmp\n");
+}
+#endif

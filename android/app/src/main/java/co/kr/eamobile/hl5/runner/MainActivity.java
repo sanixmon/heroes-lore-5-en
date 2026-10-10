@@ -39,15 +39,23 @@ public class MainActivity extends Activity implements GLSurfaceView.Renderer {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        Log.i(TAG, "MainActivity.onCreate() started");
+
+        Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+            @Override
+            public void uncaughtException(Thread thread, Throwable throwable) {
+                Log.e(TAG, "FATAL CRASH on thread " + thread.getName() + ": " + throwable.getMessage(), throwable);
+            }
+        });
 
         try {
             java.io.File internalDir = getFilesDir();
             java.io.File externalDir = getExternalFilesDir(null);
             internalPath = (internalDir != null) ? internalDir.getAbsolutePath() : "/data/data/" + getPackageName() + "/files";
             externalPath = (externalDir != null) ? externalDir.getAbsolutePath() : internalPath;
+            Log.i(TAG, "Storage paths configured: internal=" + internalPath + ", external=" + externalPath);
             if (internalDir != null && !internalDir.exists()) internalDir.mkdirs();
             if (externalDir != null && !externalDir.exists()) externalDir.mkdirs();
-
             // Extract libHeroesLore5.so from assets if not already extracted
             if (internalDir != null) {
                 java.io.File targetSo = new java.io.File(internalDir, "libHeroesLore5.so");

@@ -4,7 +4,17 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
-
+#ifdef __ANDROID__
+#include <android/log.h>
+#define LOG_TAG "HL5_GlesBridge"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#else
+#define LOGI(...) do {} while(0)
+#define LOGW(...) do {} while(0)
+#define LOGE(...) do {} while(0)
+#endif
 namespace hl5 {
 
 GlesBridge::GlesBridge()
@@ -59,6 +69,7 @@ bool GlesBridge::initialize() {
         lib_handle_ = dlopen(candidates[i], RTLD_NOW | RTLD_GLOBAL);
         if (lib_handle_) {
             provider_name_ = candidates[i];
+            LOGI("Loaded GLES provider: %s", candidates[i]);
             break;
         }
     }
@@ -66,6 +77,7 @@ bool GlesBridge::initialize() {
     if (!lib_handle_) {
         provider_name_ = "Missing / Needs GL4ES Fallback";
         gles1_supported_ = false;
+        LOGW("Failed to load libGLESv1_CM.so from system candidates; GLES1 calls will safely no-op");
         return false;
     }
 

@@ -3,7 +3,15 @@
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
-
+#ifdef __ANDROID__
+#include <android/log.h>
+#define LOG_TAG "HL5_Arm32Engine"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#else
+#define LOGI(...) do {} while(0)
+#define LOGE(...) do {} while(0)
+#endif
 namespace hl5 {
 
 Arm32NativeEngine::Arm32NativeEngine()
@@ -188,8 +196,25 @@ void Arm32NativeEngine::setup_default_libc_hooks() {
     register_host_hook("free", [](const std::vector<uint32_t>&) -> uint32_t {
         return 0;
     });
-
-    register_host_hook("__android_log_print", [](const std::vector<uint32_t>&) -> uint32_t {
+    register_host_hook("__android_log_print", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        if (args.size() >= 3) {
+            int prio = static_cast<int>(args[0]);
+            uint32_t tag_ptr = args[1];
+            uint32_t fmt_ptr = args[2];
+            char tag[64] = {0};
+            char fmt[256] = {0};
+            for (size_t i = 0; i < sizeof(tag) - 1; ++i) {
+                if (!read_memory(tag_ptr + i, &tag[i], 1) || tag[i] == 0) break;
+            }
+            for (size_t i = 0; i < sizeof(fmt) - 1; ++i) {
+                if (!read_memory(fmt_ptr + i, &fmt[i], 1) || fmt[i] == 0) break;
+            }
+#ifdef __ANDROID__
+            __android_log_print(prio, tag[0] ? tag : "HL5_Guest", "%s", fmt);
+#else
+            std::cout << "[GUEST_LOG][" << (tag[0] ? tag : "HL5_Guest") << "] " << fmt << std::endl;
+#endif
+        }
         return 0;
     });
 }

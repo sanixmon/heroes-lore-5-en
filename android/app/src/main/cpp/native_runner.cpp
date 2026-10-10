@@ -13,7 +13,17 @@
 #include <cerrno>
 #include <mutex>
 #include <atomic>
-
+#ifdef __ANDROID__
+#include <android/log.h>
+#define LOG_TAG "HL5_NativeRunner"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#else
+#define LOGI(...) do {} while(0)
+#define LOGW(...) do {} while(0)
+#define LOGE(...) do {} while(0)
+#endif
 namespace {
 hl5::Arm32NativeEngine g_native_engine;
 hl5::Arm32ElfLoader    g_elf_loader;
@@ -240,19 +250,22 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnSurfaceCreated(
     jstring internalPathStr,
     jstring externalPathStr) {
     // Runs on GLThread with active EGLContext!
+    LOGI("nativeOnSurfaceCreated entered on GLThread");
     g_frame_counter = 0;
     g_engine_ready = false;
 
     // 1. Initialize GLES Bridge with host driver
-    g_gles_bridge.initialize();
+    bool gles_ok = g_gles_bridge.initialize();
     g_gles_bridge.reset_diagnostics();
+    LOGI("GLES Bridge initialization result: %d (provider: %s)", gles_ok, g_gles_bridge.gles_provider_name());
 
     // 2. Initialize Native ARM32 Unicorn Engine
     if (!g_native_engine.initialize()) {
+        LOGE("Engine initialization failed on GLThread");
         g_last_frame_status = "[FAIL] Engine initialization failed on GLThread";
         return;
     }
-
+    LOGI("Native ARM32 Unicorn CPU Engine initialized successfully on GLThread");
     // 3. Register GLES hooks
     g_gles_bridge.register_with_engine(g_native_engine);
 
@@ -271,15 +284,23 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnSurfaceCreated(
     bool loaded = false;
     for (int i = 0; so_candidates[i] != nullptr; ++i) {
         if (access(so_candidates[i], R_OK) == 0) {
+            LOGI("Found candidate ELF at: %s, loading...", so_candidates[i]);
             loaded = g_elf_loader.load_so(so_candidates[i], g_native_engine, 0x40000000);
-            if (loaded) break;
+            if (loaded) {
+                LOGI("Successfully loaded and relocated ELF: %s", so_candidates[i]);
+                break;
+            } else {
+                LOGE("Failed to load ELF: %s", so_candidates[i]);
+            }
         }
     }
 
     if (loaded) {
         uint32_t make_inst_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager12makeInstanceEv");
         if (make_inst_sym != 0) {
+            LOGI("Calling MIDASKernelManager::makeInstance() at 0x%08x", make_inst_sym);
             g_km_instance = g_native_engine.call_function(make_inst_sym, {});
+            LOGI("MIDASKernelManager singleton created at 0x%08x", g_km_instance);
         }
         if (g_km_instance != 0) {
             // Set initial screen dimensions (400x240)
@@ -305,21 +326,26 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnSurfaceCreated(
             // Initialize 2D screen GLES states
             uint32_t init2d_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager12init2DScreenEv");
             if (init2d_sym != 0) {
+                LOGI("Calling MIDASKernelManager::init2DScreen() at 0x%08x", init2d_sym);
                 g_native_engine.call_function(init2d_sym, {g_km_instance});
             }
 
             // Create primaryScreen texture and set up vertex buffers
             uint32_t create_tex_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager14createTexturesEv");
             if (create_tex_sym != 0) {
+                LOGI("Calling MIDASKernelManager::createTextures() at 0x%08x", create_tex_sym);
                 g_native_engine.call_function(create_tex_sym, {g_km_instance});
             }
 
             g_engine_ready = true;
             g_last_frame_status = "Engine ready, primaryScreen created, storage paths mapped";
+            LOGI("Engine startup sequence complete, ready for frame rendering");
         } else {
+            LOGE("Singleton allocation failed");
             g_last_frame_status = "Singleton allocation failed";
         }
     } else {
+        LOGE("ELF binary not found or failed to load");
         g_last_frame_status = "ELF binary not found or failed to load";
     }
 }
