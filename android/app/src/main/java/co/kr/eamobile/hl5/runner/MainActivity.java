@@ -32,10 +32,10 @@ public class MainActivity extends Activity implements GLSurfaceView.Renderer {
     private native void nativeOnSurfaceCreated(String internalPath, String externalPath);
     private native void nativeOnSurfaceChanged(int width, int height);
     private native String nativeOnDrawFrame();
+    private native void nativeOnTouchEvent(int action, float rawX, float rawY, int pointerId);
     private native void nativeOnPause();
     private native void nativeOnResume();
     private native void nativeOnDestroy();
-
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -73,7 +73,32 @@ public class MainActivity extends Activity implements GLSurfaceView.Renderer {
         glSurfaceView = new GLSurfaceView(this);
         glSurfaceView.setEGLConfigChooser(8, 8, 8, 8, 16, 0);
         glSurfaceView.setRenderer(this);
+        glSurfaceView.setOnTouchListener(new android.view.View.OnTouchListener() {
+            @Override
+            public boolean onTouch(android.view.View v, android.view.MotionEvent event) {
+                int actionMasked = event.getActionMasked();
+                int pointerIndex = event.getActionIndex();
+                int pointerId = event.getPointerId(pointerIndex);
+                float x = event.getX(pointerIndex);
+                float y = event.getY(pointerIndex);
 
+                int hlAction = -1;
+                if (actionMasked == android.view.MotionEvent.ACTION_DOWN ||
+                    actionMasked == android.view.MotionEvent.ACTION_POINTER_DOWN) {
+                    hlAction = 0; // DOWN
+                } else if (actionMasked == android.view.MotionEvent.ACTION_UP ||
+                           actionMasked == android.view.MotionEvent.ACTION_POINTER_UP) {
+                    hlAction = 1; // UP
+                } else if (actionMasked == android.view.MotionEvent.ACTION_MOVE) {
+                    hlAction = 2; // MOVE
+                }
+
+                if (hlAction != -1) {
+                    nativeOnTouchEvent(hlAction, x, y, pointerId);
+                }
+                return true;
+            }
+        });
         overlayTextView = new TextView(this);
         overlayTextView.setTextColor(Color.GREEN);
         overlayTextView.setBackgroundColor(Color.argb(180, 0, 0, 0));

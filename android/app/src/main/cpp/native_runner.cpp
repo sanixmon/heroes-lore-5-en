@@ -11,16 +11,30 @@
 #include <sys/stat.h>
 #include <cstring>
 #include <cerrno>
+#include <mutex>
+#include <atomic>
 
 namespace {
 hl5::Arm32NativeEngine g_native_engine;
 hl5::Arm32ElfLoader    g_elf_loader;
 hl5::GlesBridge        g_gles_bridge;
 hl5::VfsAdapter        g_vfs_adapter;
+std::mutex             g_engine_mutex;
 uint32_t               g_km_instance = 0;
+uint32_t               g_game_instance = 0;
 int32_t                g_surface_w = 400;
 int32_t                g_surface_h = 240;
 uint64_t               g_frame_counter = 0;
+std::atomic<uint32_t>  g_touch_events_received{0};
+std::atomic<uint32_t>  g_touch_events_dispatched{0};
+int32_t                g_last_touch_type = -1;
+int32_t                g_last_touch_raw_x = -1;
+int32_t                g_last_touch_raw_y = -1;
+int32_t                g_last_touch_game_x = -1;
+int32_t                g_last_touch_game_y = -1;
+int32_t                g_current_game_state = -1;
+int32_t                g_current_game_substate = -1;
+int32_t                g_current_game_popup = -1;
 bool                   g_engine_ready = false;
 std::string            g_last_frame_status = "Awaiting first frame";
 }
@@ -325,16 +339,39 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnDrawFrame(
     jobject /*thiz*/) {
     // Runs on GLThread with current EGLContext!
     g_frame_counter++;
-
     if (g_engine_ready && g_km_instance != 0) {
-        // Execute one frame of rendering
+        std::lock_guard<std::mutex> lock(g_engine_mutex);
+        // Execute recurring frame lifecycle:
+        // 1. Process game logic and timers via nativeLoop if available
+        uint32_t loop_sym = g_elf_loader.find_symbol("Java_co_kr_eamobile_CletEntry_nativeLoop");
         uint32_t update_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager12updateScreenEv");
-        if (update_sym != 0) {
-            try {
+        try {
+            if (loop_sym != 0) {
+                g_native_engine.call_function(loop_sym, {0, 0});
+            } else if (update_sym != 0) {
                 g_native_engine.call_function(update_sym, {g_km_instance});
-            } catch (const std::exception& e) {
-                g_last_frame_status = std::string("Frame error: ") + e.what();
             }
+            
+            // Query active state from CGame object ([0x40164368])
+            uint32_t game_obj_var = 0x40164368;
+            uint32_t game_obj = 0;
+            g_native_engine.read_memory(game_obj_var, &game_obj, 4);
+            if (game_obj >= 0x40000000) {
+                g_game_instance = game_obj;
+                uint32_t state_ptr = 0;
+                g_native_engine.read_memory(game_obj + 0x27c, &state_ptr, 4);
+                if (state_ptr >= 0x40000000) {
+                    int8_t s_id = 0, ss_id = 0, p_id = 0;
+                    g_native_engine.read_memory(state_ptr + 0xc, &s_id, 1);
+                    g_native_engine.read_memory(state_ptr + 0xd, &ss_id, 1);
+                    g_native_engine.read_memory(state_ptr + 0x14, &p_id, 1);
+                    g_current_game_state = s_id;
+                    g_current_game_substate = ss_id;
+                    g_current_game_popup = p_id;
+                }
+            }
+        } catch (const std::exception& e) {
+            g_last_frame_status = std::string("Frame error: ") + e.what();
         }
     }
 
@@ -342,23 +379,102 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnDrawFrame(
     char status_buf[512];
     snprintf(status_buf, sizeof(status_buf),
              "HL5 Frame #%llu | GLES Provider: %s\n"
-             "Viewport: %dx%d | Total GLES Calls: %u\n"
-             "DrawArrays Calls: %u | Texture Binds: %u (Last Tex: %u)\n"
+             "Viewport: %dx%d | State: %d.%d (Pop: %d)\n"
+             "DrawArrays: %u | TexBinds: %u (Tex: %u)\n"
+             "Touch Rx/Tx: %u/%u | Last: t=%d raw=(%d,%d) game=(%d,%d)\n"
              "Ortho: [%.0f, %.0f, %.0f, %.0f]\n"
              "Status: %s",
              static_cast<unsigned long long>(g_frame_counter),
              g_gles_bridge.gles_provider_name(),
              g_surface_w, g_surface_h,
-             diag.total_calls,
+             g_current_game_state, g_current_game_substate, g_current_game_popup,
              diag.draw_arrays_calls,
              diag.bind_texture_calls,
              diag.last_bound_texture,
+             g_touch_events_received.load(),
+             g_touch_events_dispatched.load(),
+             g_last_touch_type,
+             g_last_touch_raw_x, g_last_touch_raw_y,
+             g_last_touch_game_x, g_last_touch_game_y,
              diag.last_ortho_left, diag.last_ortho_right,
              diag.last_ortho_bottom, diag.last_ortho_top,
              g_last_frame_status.c_str());
 
     return env->NewStringUTF(status_buf);
 }
+
+JNIEXPORT void JNICALL
+Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnTouchEvent(
+    JNIEnv* /*env*/,
+    jobject /*thiz*/,
+    jint action,
+    jfloat rawX,
+    jfloat rawY,
+    jint pointerId) {
+    // Runs on Android UI Thread!
+    g_touch_events_received++;
+
+    int32_t raw_x_int = static_cast<int32_t>(rawX);
+    int32_t raw_y_int = static_cast<int32_t>(rawY);
+    g_last_touch_raw_x = raw_x_int;
+    g_last_touch_raw_y = raw_y_int;
+
+    // Convert Android MotionEvent action (0=DOWN, 1=UP, 2=MOVE) to HL5 event types:
+    // 0x13 = Down / Pressed, 0x14 = Up / Released, 0x15 = Move / Dragged
+    int32_t event_type = -1;
+    if (action == 0) {
+        event_type = 0x13;
+    } else if (action == 1) {
+        event_type = 0x14;
+    } else if (action == 2) {
+        event_type = 0x15;
+    } else {
+        return; // Ignore other actions (CANCEL, POINTER_DOWN, etc.)
+    }
+    g_last_touch_type = event_type;
+
+    // Coordinate space mapping:
+    // Target virtual resolution: 400x240 (or 800x480 screen with 2.0x magnification)
+    // Clamp and transform from surface coordinates (g_surface_w x g_surface_h) to 400x240:
+    int32_t game_x = 0;
+    int32_t game_y = 0;
+    if (g_surface_w > 0 && g_surface_h > 0) {
+        game_x = (raw_x_int * 400) / g_surface_w;
+        game_y = (raw_y_int * 240) / g_surface_h;
+    }
+    if (game_x < 0) game_x = 0;
+    if (game_x > 399) game_x = 399;
+    if (game_y < 0) game_y = 0;
+    if (game_y > 239) game_y = 239;
+    g_last_touch_game_x = game_x;
+    g_last_touch_game_y = game_y;
+
+    if (!g_engine_ready || g_km_instance == 0) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(g_engine_mutex);
+    uint32_t touch_sym = g_elf_loader.find_symbol("Java_co_kr_eamobile_CletEntry_nativeTouchHandleEvent");
+    if (touch_sym == 0) {
+        touch_sym = g_elf_loader.find_symbol("_Z16nativeTouchHandlev"); // Fallback check
+    }
+    if (touch_sym != 0) {
+        try {
+            // JNI signature: nativeTouchHandleEvent(JNIEnv* env, jobject thiz, jint type, jint x, jint y, jint id)
+            // In Unicorn guest execution:
+            // R0 = jnienv (0), R1 = thiz (0), R2 = type, R3 = x
+            // [sp + 0] = y, [sp + 4] = pointerId
+            g_native_engine.call_function(touch_sym, {0, 0, static_cast<uint32_t>(event_type),
+                                                      static_cast<uint32_t>(game_x),
+                                                      static_cast<uint32_t>(game_y),
+                                                      static_cast<uint32_t>(pointerId)});
+            g_touch_events_dispatched++;
+        } catch (const std::exception& e) {
+            g_last_frame_status = std::string("Touch dispatch error: ") + e.what();
+        }
+    }
+}
+
 
 JNIEXPORT void JNICALL
 Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnPause(

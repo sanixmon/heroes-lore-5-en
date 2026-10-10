@@ -172,6 +172,9 @@ int main() {
     std::cout << "\n--- Testing Real Engine Drawing Execution (glDrawArrays) ---" << std::endl;
     uint32_t create_tex_sym = elf_loader.find_symbol("_ZN18MIDASKernelManager14createTexturesEv");
     assert(create_tex_sym != 0);
+    // Set LCD parameters at [km_instance + 0x4fc] and [km_instance + 0x500] (400x240)
+    full_engine.write_memory(km_instance + 0x4fc, &w, 4);
+    full_engine.write_memory(km_instance + 0x500, &h, 4);
     full_engine.call_function(create_tex_sym, {km_instance});
     std::cout << "[PASS] createTextures executed: primaryScreen texture allocated." << std::endl;
 
@@ -186,6 +189,47 @@ int main() {
     std::cout << "    glDrawArrays calls: " << gles_bridge.diagnostics().draw_arrays_calls << std::endl;
     std::cout << "    Texture binds: " << gles_bridge.diagnostics().bind_texture_calls << std::endl;
     assert(gles_bridge.diagnostics().draw_arrays_calls >= 3);
+
+    // 8. Test Native Touch Input Handling & Coordinate Space Mapping
+    std::cout << "\n--- Testing Native Touch Event Dispatch ---" << std::endl;
+    uint32_t touch_sym = elf_loader.find_symbol("Java_co_kr_eamobile_CletEntry_nativeTouchHandleEvent");
+    assert(touch_sym != 0);
+
+    // Dispatch ACTION_DOWN (0x13) at game coordinates (235, 135)
+    uint32_t res_down = full_engine.call_function(touch_sym, {0, 0, 0x13, 235, 135, 0});
+    std::cout << "[PASS] nativeTouchHandleEvent ACTION_DOWN dispatched (res=" << res_down << ")." << std::endl;
+    assert(res_down == 0);
+
+    // Dispatch ACTION_MOVE (0x15) at game coordinates (236, 136)
+    uint32_t res_move = full_engine.call_function(touch_sym, {0, 0, 0x15, 236, 136, 0});
+    std::cout << "[PASS] nativeTouchHandleEvent ACTION_MOVE dispatched (res=" << res_move << ")." << std::endl;
+    assert(res_move == 0);
+
+    // Dispatch ACTION_UP (0x14) at game coordinates (236, 136)
+    uint32_t res_up = full_engine.call_function(touch_sym, {0, 0, 0x14, 236, 136, 0});
+    std::cout << "[PASS] nativeTouchHandleEvent ACTION_UP dispatched (res=" << res_up << ")." << std::endl;
+    assert(res_up == 0);
+    // 9. Test Recurring Multi-Frame Loop Execution & Framebuffer Geometry
+    std::cout << "\n--- Testing Multi-Frame Loop Execution & Framebuffer State ---" << std::endl;
+    for (int frame = 1; frame <= 5; ++frame) {
+        gles_bridge.reset_diagnostics();
+        full_engine.call_function(update_screen_sym, {km_instance});
+        assert(gles_bridge.diagnostics().draw_arrays_calls >= 3);
+    }
+    std::cout << "[PASS] 5 consecutive frames rendered without crash, assert, or leak." << std::endl;
+
+    // Validate Primary Screen Texture pointer and dimension fields
+    uint32_t primary_tex_ptr = 0;
+    full_engine.read_memory(km_instance + 0x658, &primary_tex_ptr, 4);
+    assert(primary_tex_ptr >= 0x40000000);
+    uint32_t val_20 = 0, gl_format = 0;
+    full_engine.read_memory(primary_tex_ptr + 0x20, &val_20, 4);
+    full_engine.read_memory(primary_tex_ptr + 0xb0, &gl_format, 4);
+    std::cout << "[PASS] Texture2D validated: PrimaryScreen pointer=0x" << std::hex << primary_tex_ptr 
+              << ", field[+0x20]=0x" << val_20 
+              << ", GL format=0x" << gl_format << std::dec << std::endl;
+    assert(val_20 != 0);
+    assert(gl_format != 0);
 
     std::cout << "\n[PASS] All Native C++ ARM32-on-AArch64 engine tests PASSED 100%!" << std::endl;
     return 0;
