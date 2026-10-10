@@ -213,8 +213,12 @@ class Arm32ExecutionEngine:
         for idx in range(min(4, len(args))):
             self.uc.reg_write(regs[idx], args[idx] & 0xFFFFFFFF)
 
-        # 3. Setup Stack: 8-byte aligned per ARM EABI
-        sp = STACK_BASE + STACK_SIZE - 0x1000
+        # 3. Setup Stack: 8-byte aligned per ARM EABI, with stack arguments if len(args) > 4
+        stack_args = args[4:] if len(args) > 4 else []
+        stack_bytes = align_up(len(stack_args) * 4, 8)
+        sp = STACK_BASE + STACK_SIZE - 0x1000 - stack_bytes
+        for idx, val in enumerate(stack_args):
+            self.uc.mem_write(sp + (idx * 4), struct.pack("<I", val & 0xFFFFFFFF))
         self.uc.reg_write(UC_ARM_REG_SP, sp)
 
         # 4. Setup Link Register (LR) to return to EXIT_MAGIC_ADDR

@@ -105,7 +105,25 @@ class TestJniBridgeExecution(unittest.TestCase):
         pcm_threshold = 202400
         self.bridge.invoke_nativeInitAudioConfiguration(pcm_threshold)
 
-    def test_04_error_propagation_on_invalid_handle(self):
+    def test_04_startup_jni_nativeInitVFS_and_asset_lookup(self):
+        """
+        Verify startup JNI Call #4:
+        nativeInitVFS extracts FileDescriptor.descriptor via JNIEnv GetFieldID & GetIntField,
+        initializes VFS info in MIDASKernelManager, and resolves assets through the VfsAdapter.
+        """
+        vfs_path = ROOT_DIR / "apktool_modern" / "assets" / "data.vfs.mp3"
+        self.assertTrue(vfs_path.exists())
+        vfs_len = vfs_path.stat().st_size
+        guest_fd = self.bridge.vfs_adapter.register_asset(vfs_path, 0, vfs_len)
+        self.bridge.invoke_nativeInitVFS(guest_fd, 0, vfs_len)
+
+        # Query version.txt via MIDASKernelManager::getAssetSizeFromVFS
+        sz, off = self.bridge.invoke_getAssetSizeFromVFS("version.txt")
+        self.assertEqual(sz, 7)
+        self.assertEqual(off, 16452035)
+        print(f"\n[+] nativeInitVFS passed: version.txt size={sz}, offset={off}")
+
+    def test_05_error_propagation_on_invalid_handle(self):
         """
         Verify that invalid or corrupt guest handles throw explicit exceptions
         and are not silently swallowed.
@@ -113,12 +131,10 @@ class TestJniBridgeExecution(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.bridge.handle_table.resolve(0x12345678, HandleType.METHOD_ID)
 
-    def test_05_guest_string_safety_bounds(self):
+    def test_06_guest_string_safety_bounds(self):
         """
         Verify guest pointer safety checks when reading strings.
         """
-        # Address 0 should return empty string cleanly
         self.assertEqual(self.bridge.read_guest_string(0), "")
-
 if __name__ == "__main__":
     unittest.main()

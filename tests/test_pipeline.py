@@ -151,6 +151,26 @@ def test_jni_bridge_execution():
     bridge.invoke_nativeInitAudioConfiguration(202400)
     print(f"  [+] JNI Bridge: 54 Java callbacks resolved, nativeInitKernel and nativeInitAudioConfiguration passed")
 
+def test_vfs_bridge_execution():
+    from poc.arm32_execution_engine import Arm32ExecutionEngine
+    from poc.jni_bridge import JniBridge
+    if not SO_PATH.exists() or not BASE_VFS_PATH.exists():
+        return
+    engine = Arm32ExecutionEngine(str(SO_PATH), base_addr=0x40000000)
+    bridge = JniBridge(engine)
+    bridge.invoke_nativeInitKernel()
+    vfs_len = BASE_VFS_PATH.stat().st_size
+    guest_fd = bridge.vfs_adapter.register_asset(BASE_VFS_PATH, 0, vfs_len)
+    bridge.invoke_nativeInitVFS(guest_fd, 0, vfs_len)
+    sz_v, off_v = bridge.invoke_getAssetSizeFromVFS("version.txt")
+    assert sz_v == 7, f"Expected version.txt size 7, got {sz_v}"
+    assert off_v == 16452035, f"Expected version.txt offset 16452035, got {off_v}"
+    sz_n, off_n = bridge.invoke_getAssetSizeFromVFS("c/csv/name.dat")
+    assert sz_n == 660, f"Expected name.dat size 660, got {sz_n}"
+    assert off_n == 314103, f"Expected name.dat offset 314103, got {off_n}"
+    bridge.vfs_adapter.close_all()
+    print(f"  [+] VFS Bridge: nativeInitVFS succeeded, version.txt & name.dat verified against real game data")
+
 if __name__ == "__main__":
     tests = [
         test_vfs_hash_and_manifest,
@@ -163,6 +183,7 @@ if __name__ == "__main__":
         test_fixture_execution,
         test_hl5_engine_execution,
         test_jni_bridge_execution,
+        test_vfs_bridge_execution,
     ]
     failed = 0
     for t in tests:

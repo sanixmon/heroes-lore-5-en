@@ -3,7 +3,9 @@
 #include <sstream>
 #include "jni_bridge_core.h"
 #include "gles_bridge.h"
-
+#include "vfs_adapter.h"
+#include <unistd.h>
+#include <fcntl.h>
 extern "C" {
 
 JNIEXPORT jstring JNICALL
@@ -57,6 +59,57 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeRunDiagnosticTests(JNIEnv* env
     bool gles_ok = gles_bridge.initialize();
     oss << "[+] GLES 1.1 Audit: Provider = " << gles_bridge.gles_provider_name()
         << ", GLES 1.1 Supported = " << (gles_ok ? "YES" : "NO (GL4ES Needed)") << "\n";
+
+    // 4. Virtual File System (VFS) Adapter Diagnostics
+    hl5::VfsAdapter vfs_adapter;
+    // Create a temporary pipe / file to simulate game asset
+    char tmp_path[] = "/data/local/tmp/vfs_test_XXXXXX";
+    int tmp_fd = mkstemp(tmp_path);
+    if (tmp_fd < 0) {
+        // Fallback for restricted app sandbox without /data/local/tmp
+        char local_tmp[] = "/tmp/vfs_test_XXXXXX";
+        tmp_fd = mkstemp(local_tmp);
+    }
+    if (tmp_fd >= 0) {
+        const char test_data[] = "VFS_TEST_HEADER_PAYLOAD_1234567890";
+        write(tmp_fd, test_data, sizeof(test_data));
+        lseek(tmp_fd, 0, SEEK_SET);
+
+        uint32_t guest_fd = vfs_adapter.register_asset(tmp_fd, 4, 15); // Offset 4, Length 15
+        oss << "[+] VFS Registered: Guest FD 0x" << std::hex << guest_fd << std::dec << "\n";
+
+        uint32_t dup_fd = vfs_adapter.hook_dup(guest_fd);
+        uint32_t fp_handle = vfs_adapter.hook_fdopen(dup_fd, "rb");
+        if (fp_handle > 0) {
+            oss << "[PASS] VFS Stream handle allocated: 0x" << std::hex << fp_handle << std::dec << " (No 64-bit truncation)\n";
+            vfs_adapter.hook_fseek(fp_handle, 0, SEEK_SET);
+
+            uint32_t guest_buf = addr_space.allocate_guest(64);
+            size_t read_items = vfs_adapter.hook_fread(guest_buf, 1, 10, fp_handle, addr_space);
+            if (read_items == 10) {
+                char* read_ptr = static_cast<char*>(addr_space.to_host_ptr(guest_buf));
+                std::string read_str(read_ptr, 10);
+                oss << "[PASS] VFS Read verified across offset: \"" << read_str << "\"\n";
+            } else {
+                oss << "[FAIL] VFS Read item mismatch!\n";
+            }
+
+            // Out-of-bounds guest memory validation check
+            size_t oob_read = vfs_adapter.hook_fread(0xFFFFFF00, 1, 10, fp_handle, addr_space);
+            if (oob_read == 0) {
+                oss << "[PASS] Out-of-bounds guest memory read rejected safely.\n";
+            } else {
+                oss << "[FAIL] Out-of-bounds read was not rejected!\n";
+            }
+
+            vfs_adapter.hook_fclose(fp_handle);
+        } else {
+            oss << "[FAIL] VFS fdopen failed!\n";
+        }
+        close(tmp_fd);
+    } else {
+        oss << "[WARN] Unable to create temp file for VFS descriptor test in current sandbox.\n";
+    }
 
     return env->NewStringUTF(oss.str().c_str());
 }

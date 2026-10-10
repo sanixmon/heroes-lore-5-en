@@ -54,6 +54,8 @@ from poc.arm32_execution_engine import (
     Arm32ExecutionEngine,
     align_up,
 )
+from poc.vfs_adapter import VfsAdapter
+
 
 
 class HandleType(enum.Enum):
@@ -144,6 +146,7 @@ class JniBridge:
     def __init__(self, engine: Arm32ExecutionEngine) -> None:
         self.engine = engine
         self.handle_table = TypedHandleTable()
+        self.vfs_adapter = VfsAdapter()
 
         # Track registered Java callbacks on host
         self.static_methods: Dict[Tuple[str, str, str], Callable[..., Any]] = {}
@@ -152,6 +155,7 @@ class JniBridge:
         self.jnienv32_ptr = 0
         self.javavm32_ptr = 0
         self._setup_jnienv32()
+        self._register_libc_filesystem_hooks()
 
     def _setup_jnienv32(self) -> None:
         # Allocate JNIEnv* struct and JNINativeInterface table in guest heap (< 4GB)
@@ -190,6 +194,8 @@ class JniBridge:
         self._register_jni_slot(table_vaddr, 0x2A4, "JNIEnv::GetStringUTFChars", self._jni_GetStringUTFChars)
         self._register_jni_slot(table_vaddr, 0x2A8, "JNIEnv::ReleaseStringUTFChars", self._jni_ReleaseStringUTFChars)
         self._register_jni_slot(table_vaddr, 0x36C, "JNIEnv::GetJavaVM", self._jni_GetJavaVM)
+        self._register_jni_slot(table_vaddr, 0x178, "JNIEnv::GetFieldID", self._jni_GetFieldID)
+        self._register_jni_slot(table_vaddr, 0x190, "JNIEnv::GetIntField", self._jni_GetIntField)
 
     def _register_jni_slot(
         self,
@@ -219,6 +225,31 @@ class JniBridge:
             if len(chars) > 4096:
                 raise ValueError("Guest string exceeded maximum safety length (4096 bytes)")
         return bytes(chars).decode("utf-8", errors="replace")
+    def _register_libc_filesystem_hooks(self) -> None:
+        self.engine.register_host_hook("dup", self.vfs_adapter.hook_dup)
+        self.engine.register_host_hook("fdopen", self.vfs_adapter.hook_fdopen)
+        self.engine.register_host_hook("fseek", self.vfs_adapter.hook_fseek)
+        self.engine.register_host_hook("fread", lambda args: self.vfs_adapter.hook_fread(args, self.engine))
+        self.engine.register_host_hook("fclose", self.vfs_adapter.hook_fclose)
+        self.engine.register_host_hook("__errno", lambda args: self.engine.heap_curr)
+
+    def _jni_GetFieldID(self, args: List[int]) -> int:
+        cls_handle, name_ptr, sig_ptr = args[1], args[2], args[3]
+        cls_name = self.handle_table.resolve(cls_handle, HandleType.LOCAL_REF)
+        name = self.read_guest_string(name_ptr)
+        sig = self.read_guest_string(sig_ptr)
+        fid = self.handle_table.allocate(HandleType.FIELD_ID, (cls_name, name, sig))
+        return fid
+
+    def _jni_GetIntField(self, args: List[int]) -> int:
+        obj_handle, fid_handle = args[1], args[2]
+        obj = self.handle_table.resolve(obj_handle, HandleType.LOCAL_REF)
+        if isinstance(obj, dict) and "descriptor" in obj:
+            return int(obj["descriptor"])
+        if isinstance(obj, int):
+            return int(obj)
+        return 0
+
 
     # --------------------------------------------------------------------------
     # JNI Function Trampoline Handlers (Executed when ARM32 engine calls JNIEnv)
@@ -404,3 +435,59 @@ class JniBridge:
             return ret_val
         finally:
             self.handle_table.pop_local_frame()
+
+    def invoke_nativeInitVFS(self, guest_fd: int, start_offset: int, length: int) -> None:
+        """
+        Startup JNI Call #4:
+          void Java_co_kr_eamobile_CletEntry_nativeInitVFS(JNIEnv* env, jobject thiz, jobject fileDescriptor, jlong offset, jlong length)
+        """
+        self.handle_table.push_local_frame()
+        try:
+            thiz_handle = self.handle_table.allocate(HandleType.LOCAL_REF, "CletEntry_instance")
+            fd_obj = {"class": "java/io/FileDescriptor", "descriptor": guest_fd}
+            fd_handle = self.handle_table.allocate(HandleType.LOCAL_REF, fd_obj, class_name="java/io/FileDescriptor")
+
+            # Stack args for nativeInitVFS in ARM32 EABI:
+            # R0 = env, R1 = thiz, R2 = fd_handle, R3 = 0 (alignment)
+            # [sp + 0] = offset_low
+            # [sp + 4] = offset_high
+            # [sp + 8] = length_low
+            # [sp + 12] = length_high
+            offset_low = start_offset & 0xFFFFFFFF
+            offset_high = (start_offset >> 32) & 0xFFFFFFFF
+            length_low = length & 0xFFFFFFFF
+            length_high = (length >> 32) & 0xFFFFFFFF
+
+            self.engine.call_function(
+                "Java_co_kr_eamobile_CletEntry_nativeInitVFS",
+                self.jnienv32_ptr,
+                thiz_handle,
+                fd_handle,
+                0,
+                offset_low,
+                offset_high,
+                length_low,
+                length_high,
+            )
+        finally:
+            self.handle_table.pop_local_frame()
+
+    def invoke_getAssetSizeFromVFS(self, asset_name: str) -> Tuple[int, int]:
+        """
+        Calls MIDASKernelManager::getAssetSizeFromVFS(char const* asset_name, unsigned long* size_out)
+        Returns (size, payload_offset).
+        """
+        s_ptr = self.engine.write_string(asset_name)
+        out_ptr = self.engine.heap_curr
+        self.engine.heap_curr += 8
+        self.engine.uc.mem_write(out_ptr, b"\x00" * 8)
+
+        km_inst = self.engine.call_function("_ZN18MIDASKernelManager11getInstanceEv")
+        size = self.engine.call_function(
+            "_ZN18MIDASKernelManager19getAssetSizeFromVFSEPKcPm",
+            km_inst,
+            s_ptr,
+            out_ptr,
+        )
+        payload_offset = struct.unpack("<I", self.engine.uc.mem_read(out_ptr, 4))[0]
+        return size, payload_offset
