@@ -19,7 +19,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private native String nativeRunDiagnosticTests();
+    private native String nativeRunDiagnosticTests(String internalPath, String externalPath);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -34,7 +34,16 @@ public class MainActivity extends Activity {
         textView.setPadding(24, 24, 24, 24);
 
         try {
-            String diagResults = nativeRunDiagnosticTests();
+            java.io.File internalDir = getFilesDir();
+            java.io.File externalDir = getExternalFilesDir(null);
+            String intPath = (internalDir != null) ? internalDir.getAbsolutePath() : "/data/data/" + getPackageName() + "/files";
+            String extPath = (externalDir != null) ? externalDir.getAbsolutePath() : intPath;
+
+            // Ensure directories exist
+            if (internalDir != null && !internalDir.exists()) internalDir.mkdirs();
+            if (externalDir != null && !externalDir.exists()) externalDir.mkdirs();
+
+            String diagResults = nativeRunDiagnosticTests(intPath, extPath);
             Log.i(TAG, "Diagnostics Result:\n" + diagResults);
             textView.setText(diagResults);
         } catch (Throwable t) {

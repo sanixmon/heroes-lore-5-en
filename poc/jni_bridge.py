@@ -232,6 +232,7 @@ class JniBridge:
         self.engine.register_host_hook("fread", lambda args: self.vfs_adapter.hook_fread(args, self.engine))
         self.engine.register_host_hook("fclose", self.vfs_adapter.hook_fclose)
         self.engine.register_host_hook("__errno", lambda args: self.engine.heap_curr)
+        self.engine.register_host_hook("strdup", lambda args: self.engine.write_string(self.read_guest_string(args[0]), encoding="utf-8"))
 
     def _jni_GetFieldID(self, args: List[int]) -> int:
         cls_handle, name_ptr, sig_ptr = args[1], args[2], args[3]
@@ -380,6 +381,36 @@ class JniBridge:
             )
         finally:
             self.handle_table.pop_local_frame()
+    def invoke_nativeInitFileStorage(self, internal_path: str, external_path: str) -> None:
+        """
+        Startup JNI Call #3:
+          void Java_co_kr_eamobile_CletEntry_nativeInitFileStorage(JNIEnv* env, jobject thiz, jstring internalPath, jstring externalPath)
+        """
+        self.handle_table.push_local_frame()
+        try:
+            thiz_handle = self.handle_table.allocate(HandleType.LOCAL_REF, "CletEntry_instance")
+            int_str = self.handle_table.allocate(HandleType.LOCAL_REF, internal_path, class_name="java/lang/String")
+            ext_str = self.handle_table.allocate(HandleType.LOCAL_REF, external_path, class_name="java/lang/String")
+            self.engine.call_function(
+                "Java_co_kr_eamobile_CletEntry_nativeInitFileStorage",
+                self.jnienv32_ptr,
+                thiz_handle,
+                int_str,
+                ext_str,
+            )
+        finally:
+            self.handle_table.pop_local_frame()
+
+    def invoke_getInternalFsAbsPath(self) -> str:
+        km_inst = self.engine.call_function("_ZN18MIDASKernelManager11getInstanceEv")
+        ptr = self.engine.call_function("_ZN18MIDASKernelManager20getInternalFsAbsPathEv", km_inst)
+        return self.read_guest_string(ptr)
+
+    def invoke_getExternalFsAbsPath(self) -> str:
+        km_inst = self.engine.call_function("_ZN18MIDASKernelManager11getInstanceEv")
+        ptr = self.engine.call_function("_ZN18MIDASKernelManager20getExternalFsAbsPathEv", km_inst)
+        return self.read_guest_string(ptr)
+
 
     def invoke_nativeInitDisplay(
         self,
