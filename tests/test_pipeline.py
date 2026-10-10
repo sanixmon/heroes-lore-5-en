@@ -31,6 +31,7 @@ from tools.hl5_formats import (
 from tools.hl5_vfs import VfsArchive, djb2_hash
 from tools.validate_translations import validate_catalog
 
+from poc.test_execution_engine import test_fixture_execution, test_hl5_engine_execution
 BASE_VFS_PATH = ROOT_DIR / "apktool_modern" / "assets" / "data.vfs.mp3"
 SO_PATH = ROOT_DIR / "apktool_modern" / "lib" / "armeabi" / "libHeroesLore5.so"
 
@@ -142,6 +143,8 @@ if __name__ == "__main__":
         test_bfont_layout_and_wrapping,
         test_translation_validation_suite,
         test_rebuilt_apk_structure_and_signature,
+        test_fixture_execution,
+        test_hl5_engine_execution,
     ]
     failed = 0
     for t in tests:

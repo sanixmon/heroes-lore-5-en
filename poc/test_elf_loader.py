@@ -131,18 +131,28 @@ class Arm32ElfLoader:
                 struct.pack_into("<I", self.memory, r_offset, new_val)
                 stats["R_ARM_RELATIVE"] += 1
             elif r_type == 21:  # R_ARM_GLOB_DAT
-                sym_name = self.dynsym_by_idx[r_sym][0]
-                target_val = bridge_table.get(sym_name, 0xDEAD0000)
+                sym_name, st_val, _ = self.dynsym_by_idx[r_sym]
+                if st_val != 0:
+                    target_val = self.base_addr + st_val
+                elif sym_name in bridge_table:
+                    target_val = bridge_table[sym_name]
+                else:
+                    target_val = 0xDEAD0000
+                    stats["unresolved"] += 1
                 struct.pack_into("<I", self.memory, r_offset, target_val & 0xFFFFFFFF)
                 stats["R_ARM_GLOB_DAT"] += 1
             elif r_type == 2:  # R_ARM_ABS32
-                sym_name = self.dynsym_by_idx[r_sym][0]
-                target_val = bridge_table.get(sym_name, (self.base_addr + self.dynsym_by_idx[r_sym][1]))
+                sym_name, st_val, _ = self.dynsym_by_idx[r_sym]
+                if st_val != 0:
+                    sym_addr = self.base_addr + st_val
+                elif sym_name in bridge_table:
+                    sym_addr = bridge_table[sym_name]
+                else:
+                    sym_addr = 0
                 orig_val = struct.unpack_from("<I", self.memory, r_offset)[0]
-                new_val = (orig_val + target_val) & 0xFFFFFFFF
+                new_val = (orig_val + sym_addr) & 0xFFFFFFFF
                 struct.pack_into("<I", self.memory, r_offset, new_val)
                 stats["R_ARM_ABS32"] += 1
-
         # Apply DT_JMPREL (.rel.plt)
         for i in range(0, self.pltrel_sz, 8):
             r_offset, r_info = struct.unpack_from("<II", self.memory, self.jmprel_off + i)
