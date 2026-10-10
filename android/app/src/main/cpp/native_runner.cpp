@@ -561,10 +561,16 @@ JNIEXPORT void JNICALL
 Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnPause(
     JNIEnv* /*env*/,
     jobject /*thiz*/) {
+    LOGI("nativeOnPause invoked from UI thread");
+    std::lock_guard<std::mutex> lock(g_engine_mutex);
     if (g_engine_ready && g_km_instance != 0) {
-        uint32_t deinit_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager14deinit2DScreenEv");
-        if (deinit_sym != 0) {
-            g_native_engine.call_function(deinit_sym, {g_km_instance});
+        try {
+            uint32_t deinit_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager14deinit2DScreenEv");
+            if (deinit_sym != 0) {
+                g_native_engine.call_function(deinit_sym, {g_km_instance});
+            }
+        } catch (const std::exception& e) {
+            LOGW("nativeOnPause deinit exception: %s", e.what());
         }
     }
 }
@@ -573,10 +579,16 @@ JNIEXPORT void JNICALL
 Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnResume(
     JNIEnv* /*env*/,
     jobject /*thiz*/) {
+    LOGI("nativeOnResume invoked from UI thread");
+    std::lock_guard<std::mutex> lock(g_engine_mutex);
     if (g_engine_ready && g_km_instance != 0) {
-        uint32_t init_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager12init2DScreenEv");
-        if (init_sym != 0) {
-            g_native_engine.call_function(init_sym, {g_km_instance});
+        try {
+            uint32_t init_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager12init2DScreenEv");
+            if (init_sym != 0) {
+                g_native_engine.call_function(init_sym, {g_km_instance});
+            }
+        } catch (const std::exception& e) {
+            LOGW("nativeOnResume init exception: %s", e.what());
         }
     }
 }
@@ -585,9 +597,12 @@ JNIEXPORT void JNICALL
 Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnDestroy(
     JNIEnv* /*env*/,
     jobject /*thiz*/) {
-    g_native_engine.close();
+    LOGI("nativeOnDestroy invoked from UI thread");
+    std::lock_guard<std::mutex> lock(g_engine_mutex);
+    try {
+        g_native_engine.close();
+    } catch (...) {}
     g_engine_ready = false;
     g_km_instance = 0;
 }
-
 } // extern "C"
