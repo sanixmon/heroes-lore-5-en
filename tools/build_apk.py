@@ -271,10 +271,11 @@ def run_full_build(
     base_vfs.write_bytes(repacked_vfs_bytes)
     print(f"[+] Replaced {base_vfs} ({len(repacked_vfs_bytes):,} bytes, SHA256={vfs_stats['repacked_vfs_sha256'][:16]}...)")
 
-    print("[2/5] Patching BFont yellow color escape in libHeroesLore5.so...")
-    so_path = apktool_dir / "lib" / "armeabi" / "libHeroesLore5.so"
-    patch_stats = patch_native_library(so_path)
-    print(f"[+] Native patch: {patch_stats['status']} at {patch_stats['offset']}")
+    print("[2/5] Patching BFont yellow color escape in all lib/*/libHeroesLore5.so copies...")
+    patch_stats = None
+    for so_file in apktool_dir.glob("lib/*/libHeroesLore5.so"):
+        patch_stats = patch_native_library(so_file)
+        print(f"[+] Native patch on {so_file.parent.name}: {patch_stats['status']} at {patch_stats['offset']}")
 
     print("[3/5] Updating Android strings (app_name)...")
     strings_xml = apktool_dir / "res" / "values" / "strings.xml"
