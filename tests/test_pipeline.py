@@ -5,6 +5,7 @@ Heroes Lore 5 English Translation — Automated Test Suite
 
 import hashlib
 import json
+import struct
 import subprocess
 import sys
 import zipfile
@@ -171,6 +172,26 @@ def test_vfs_bridge_execution():
     bridge.vfs_adapter.close_all()
     print(f"  [+] VFS Bridge: nativeInitVFS succeeded, version.txt & name.dat verified against real game data")
 
+def test_gles_bridge_execution():
+    from poc.arm32_execution_engine import Arm32ExecutionEngine
+    from poc.jni_bridge import JniBridge
+    if not SO_PATH.exists():
+        return
+    engine = Arm32ExecutionEngine(str(SO_PATH), base_addr=0x40000000)
+    bridge = JniBridge(engine)
+    bridge.invoke_nativeInitKernel()
+    captured = []
+    for sym in ["glViewport", "glMatrixMode", "glLoadIdentity", "glOrthof", "glEnableClientState"]:
+        engine.register_host_hook(sym, lambda args, name=sym: (captured.append(name), 0)[1])
+    km_inst = engine.call_function("_ZN18MIDASKernelManager11getInstanceEv")
+    engine.uc.mem_write(km_inst + 0x624, struct.pack("<I", 400))
+    engine.uc.mem_write(km_inst + 0x628, struct.pack("<I", 240))
+    engine.call_function("_ZN18MIDASKernelManager12init2DScreenEv", km_inst)
+    assert "glViewport" in captured
+    assert "glOrthof" in captured
+    assert "glEnableClientState" in captured
+    print(f"  [+] GLES Bridge: init2DScreen dispatched {len(captured)} real GLES calls to host bridge")
+
 if __name__ == "__main__":
     tests = [
         test_vfs_hash_and_manifest,
@@ -184,6 +205,7 @@ if __name__ == "__main__":
         test_hl5_engine_execution,
         test_jni_bridge_execution,
         test_vfs_bridge_execution,
+        test_gles_bridge_execution,
     ]
     failed = 0
     for t in tests:

@@ -119,11 +119,28 @@ uint32_t Arm32NativeEngine::write_string(const std::string& str) {
 }
 
 uint32_t Arm32NativeEngine::register_host_hook(const std::string& name, HostHookFn fn) {
+    for (const auto& pair : trampoline_map_) {
+        if (pair.second == name) {
+            host_hooks_[name] = std::move(fn);
+            return pair.first;
+        }
+    }
     uint32_t t_addr = next_trampoline_addr_;
     next_trampoline_addr_ += 8;
     trampoline_map_[t_addr] = name;
     host_hooks_[name] = std::move(fn);
     return t_addr;
+}
+
+uint32_t Arm32NativeEngine::get_or_create_hook(const std::string& name) {
+    for (const auto& pair : trampoline_map_) {
+        if (pair.second == name) {
+            return pair.first;
+        }
+    }
+    return register_host_hook(name, [](const std::vector<uint32_t>&) -> uint32_t {
+        return 0;
+    });
 }
 
 void Arm32NativeEngine::setup_default_libc_hooks() {
@@ -184,20 +201,29 @@ void Arm32NativeEngine::on_code_hook(uc_engine* uc, uint64_t address, uint32_t /
         return;
     }
 
-    uint32_t r0 = 0, r1 = 0, r2 = 0, r3 = 0, lr = 0;
+    uint32_t r0 = 0, r1 = 0, r2 = 0, r3 = 0, lr = 0, sp = 0;
     uc_reg_read(uc, UC_ARM_REG_R0, &r0);
     uc_reg_read(uc, UC_ARM_REG_R1, &r1);
     uc_reg_read(uc, UC_ARM_REG_R2, &r2);
     uc_reg_read(uc, UC_ARM_REG_R3, &r3);
     uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+    uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+
+    std::vector<uint32_t> args = {r0, r1, r2, r3};
+    if (sp >= NATIVE_STACK_BASE && sp <= (NATIVE_STACK_BASE + NATIVE_STACK_SIZE - 32)) {
+        uint32_t stack_words[8] = {0};
+        if (self->read_memory(sp, stack_words, sizeof(stack_words))) {
+            for (int i = 0; i < 8; ++i) {
+                args.push_back(stack_words[i]);
+            }
+        }
+    }
 
     uint32_t ret_val = 0;
     auto hook_it = self->host_hooks_.find(it->second);
     if (hook_it != self->host_hooks_.end()) {
-        std::vector<uint32_t> args = {r0, r1, r2, r3};
         ret_val = hook_it->second(args);
     }
-
     uc_reg_write(uc, UC_ARM_REG_R0, &ret_val);
     uc_reg_write(uc, UC_ARM_REG_PC, &lr);
 }

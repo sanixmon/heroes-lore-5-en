@@ -5,11 +5,25 @@
 #include "gles_bridge.h"
 #include "vfs_adapter.h"
 #include "arm32_native_engine.h"
+#include "arm32_elf_loader.h"
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <cstring>
 #include <cerrno>
+
+namespace {
+hl5::Arm32NativeEngine g_native_engine;
+hl5::Arm32ElfLoader    g_elf_loader;
+hl5::GlesBridge        g_gles_bridge;
+hl5::VfsAdapter        g_vfs_adapter;
+uint32_t               g_km_instance = 0;
+int32_t                g_surface_w = 400;
+int32_t                g_surface_h = 240;
+uint64_t               g_frame_counter = 0;
+bool                   g_engine_ready = false;
+std::string            g_last_frame_status = "Awaiting first frame";
+}
 extern "C" {
 
 JNIEXPORT jstring JNICALL
@@ -203,6 +217,153 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeRunDiagnosticTests(
     }
 
     return env->NewStringUTF(oss.str().c_str());
+}
+
+JNIEXPORT void JNICALL
+Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnSurfaceCreated(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jstring internalPathStr,
+    jstring externalPathStr) {
+    // Runs on GLThread with active EGLContext!
+    g_frame_counter = 0;
+    g_engine_ready = false;
+
+    // 1. Initialize GLES Bridge with host driver
+    g_gles_bridge.initialize();
+    g_gles_bridge.reset_diagnostics();
+
+    // 2. Initialize Native ARM32 Unicorn Engine
+    if (!g_native_engine.initialize()) {
+        g_last_frame_status = "[FAIL] Engine initialization failed on GLThread";
+        return;
+    }
+
+    // 3. Register GLES hooks
+    g_gles_bridge.register_with_engine(g_native_engine);
+
+    // 4. Try loading libHeroesLore5.so from candidate locations
+    const char* so_candidates[] = {
+        "apktool_modern/lib/armeabi/libHeroesLore5.so",
+        "/data/local/tmp/libHeroesLore5.so",
+        nullptr
+    };
+
+    bool loaded = false;
+    for (int i = 0; so_candidates[i] != nullptr; ++i) {
+        if (access(so_candidates[i], R_OK) == 0) {
+            loaded = g_elf_loader.load_so(so_candidates[i], g_native_engine, 0x40000000);
+            if (loaded) break;
+        }
+    }
+
+    if (loaded) {
+        uint32_t make_inst_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager12makeInstanceEv");
+        if (make_inst_sym != 0) {
+            g_km_instance = g_native_engine.call_function(make_inst_sym, {});
+        }
+        g_engine_ready = (g_km_instance != 0);
+        g_last_frame_status = g_engine_ready ? "Engine ready on GLThread" : "Singleton allocation failed";
+    } else {
+        g_last_frame_status = "ELF binary not found or failed to load";
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnSurfaceChanged(
+    JNIEnv* /*env*/,
+    jobject /*thiz*/,
+    jint width,
+    jint height) {
+    // Runs on GLThread!
+    g_surface_w = width;
+    g_surface_h = height;
+
+    if (g_engine_ready && g_km_instance != 0) {
+        uint32_t w = static_cast<uint32_t>(width);
+        uint32_t h = static_cast<uint32_t>(height);
+        g_native_engine.write_memory(g_km_instance + 0x624, &w, 4);
+        g_native_engine.write_memory(g_km_instance + 0x628, &h, 4);
+
+        uint32_t init2d_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager12init2DScreenEv");
+        if (init2d_sym != 0) {
+            g_native_engine.call_function(init2d_sym, {g_km_instance});
+        }
+    }
+}
+
+JNIEXPORT jstring JNICALL
+Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnDrawFrame(
+    JNIEnv* env,
+    jobject /*thiz*/) {
+    // Runs on GLThread with current EGLContext!
+    g_frame_counter++;
+
+    if (g_engine_ready && g_km_instance != 0) {
+        // Execute one frame of rendering
+        uint32_t update_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager12updateScreenEv");
+        if (update_sym != 0) {
+            try {
+                g_native_engine.call_function(update_sym, {g_km_instance});
+            } catch (const std::exception& e) {
+                g_last_frame_status = std::string("Frame error: ") + e.what();
+            }
+        }
+    }
+
+    const auto& diag = g_gles_bridge.diagnostics();
+    char status_buf[512];
+    snprintf(status_buf, sizeof(status_buf),
+             "HL5 Frame #%llu | GLES Provider: %s\n"
+             "Viewport: %dx%d | Total GLES Calls: %u\n"
+             "DrawArrays Calls: %u | Texture Binds: %u (Last Tex: %u)\n"
+             "Ortho: [%.0f, %.0f, %.0f, %.0f]\n"
+             "Status: %s",
+             static_cast<unsigned long long>(g_frame_counter),
+             g_gles_bridge.gles_provider_name(),
+             g_surface_w, g_surface_h,
+             diag.total_calls,
+             diag.draw_arrays_calls,
+             diag.bind_texture_calls,
+             diag.last_bound_texture,
+             diag.last_ortho_left, diag.last_ortho_right,
+             diag.last_ortho_bottom, diag.last_ortho_top,
+             g_last_frame_status.c_str());
+
+    return env->NewStringUTF(status_buf);
+}
+
+JNIEXPORT void JNICALL
+Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnPause(
+    JNIEnv* /*env*/,
+    jobject /*thiz*/) {
+    if (g_engine_ready && g_km_instance != 0) {
+        uint32_t deinit_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager14deinit2DScreenEv");
+        if (deinit_sym != 0) {
+            g_native_engine.call_function(deinit_sym, {g_km_instance});
+        }
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnResume(
+    JNIEnv* /*env*/,
+    jobject /*thiz*/) {
+    if (g_engine_ready && g_km_instance != 0) {
+        uint32_t init_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager12init2DScreenEv");
+        if (init_sym != 0) {
+            g_native_engine.call_function(init_sym, {g_km_instance});
+        }
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnDestroy(
+    JNIEnv* /*env*/,
+    jobject /*thiz*/) {
+    g_native_engine.close();
+    g_engine_ready = false;
+    g_km_instance = 0;
 }
 
 } // extern "C"

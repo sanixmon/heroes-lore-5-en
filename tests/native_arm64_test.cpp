@@ -4,6 +4,8 @@
 #include <cstring>
 #include <fstream>
 #include "arm32_native_engine.h"
+#include "arm32_elf_loader.h"
+#include "gles_bridge.h"
 
 // Simple ELF loader for test fixture
 struct ElfLoader {
@@ -104,9 +106,67 @@ int main() {
                   << std::hex << hash_res << std::dec << " (expected 0x9abed099)" << std::endl;
         assert(hash_res == 0x9abed099);
         std::cout << "[PASS] Verified real libHeroesLore5.so execution on native AArch64!" << std::endl;
-    } else {
-        std::cerr << "[WARN] Could not open libHeroesLore5.so for test 4." << std::endl;
     }
+
+    // 5. Test Full Dynamic ELF Loading & Symbol Resolution in C++
+    std::cout << "\n--- Testing Full ELF Loader in C++ ---" << std::endl;
+    hl5::Arm32NativeEngine full_engine;
+    full_engine.initialize();
+
+    hl5::GlesBridge gles_bridge;
+    gles_bridge.initialize();
+    gles_bridge.register_with_engine(full_engine);
+
+    hl5::Arm32ElfLoader elf_loader;
+    bool loaded = elf_loader.load_so(so_path, full_engine, 0x40000000);
+    assert(loaded);
+    std::cout << "[PASS] libHeroesLore5.so loaded dynamically into guest memory at 0x"
+              << std::hex << elf_loader.base_addr() << ", size: " << std::dec << elf_loader.total_size() << " bytes" << std::endl;
+    std::cout << "[+] Total dynamic symbols parsed: " << elf_loader.symbols().size() << std::endl;
+    assert(elf_loader.symbols().size() > 500);
+
+    // Test calling resolved symbol via dynamic loader
+    uint32_t hash_sym = elf_loader.find_symbol("_ZN18MIDASKernelManager4hashEPh");
+    assert(hash_sym != 0);
+    uint32_t s_ptr = full_engine.write_string("c/csv/name.dat");
+    uint32_t h_res = full_engine.call_function(hash_sym, {0, s_ptr});
+    std::cout << "[+] Dynamic call hash('c/csv/name.dat') = 0x"
+              << std::hex << h_res << std::dec << " (expected 0x53c493da)" << std::endl;
+    assert(h_res == 0x53c493da);
+
+    // 6. Test Real Engine GLES Initialization via init2DScreen
+    std::cout << "\n--- Testing Real Engine GLES Execution via init2DScreen ---" << std::endl;
+    uint32_t make_inst_sym = elf_loader.find_symbol("_ZN18MIDASKernelManager12makeInstanceEv");
+    assert(make_inst_sym != 0);
+    uint32_t km_instance = full_engine.call_function(make_inst_sym, {});
+    assert(km_instance != 0);
+    std::cout << "[PASS] MIDASKernelManager singleton created at 0x" << std::hex << km_instance << std::dec << std::endl;
+
+    // Set display width=400, height=240 in instance fields (offsets 0x624 and 0x628)
+    uint32_t w = 400, h = 240;
+    full_engine.write_memory(km_instance + 0x624, &w, 4);
+    full_engine.write_memory(km_instance + 0x628, &h, 4);
+
+    uint32_t init2d_sym = elf_loader.find_symbol("_ZN18MIDASKernelManager12init2DScreenEv");
+    assert(init2d_sym != 0);
+
+    gles_bridge.reset_diagnostics();
+    full_engine.call_function(init2d_sym, {km_instance});
+    std::cout << "[PASS] init2DScreen executed successfully!" << std::endl;
+    std::cout << "[+] GLES Diagnostics after init2DScreen:" << std::endl;
+    std::cout << "    Total GLES calls: " << gles_bridge.diagnostics().total_calls << std::endl;
+    std::cout << "    Viewport: " << gles_bridge.diagnostics().viewport_w << "x" << gles_bridge.diagnostics().viewport_h << std::endl;
+    std::cout << "    Ortho: left=" << gles_bridge.diagnostics().last_ortho_left
+              << ", right=" << gles_bridge.diagnostics().last_ortho_right
+              << ", bottom=" << gles_bridge.diagnostics().last_ortho_bottom
+              << ", top=" << gles_bridge.diagnostics().last_ortho_top << std::endl;
+
+    assert(gles_bridge.diagnostics().total_calls >= 10);
+    assert(gles_bridge.diagnostics().viewport_w == 400);
+    assert(gles_bridge.diagnostics().viewport_h == 240);
+    assert(gles_bridge.diagnostics().last_ortho_right == 400.0f);
+    assert(gles_bridge.diagnostics().last_ortho_bottom == 0.0f);
+    assert(gles_bridge.diagnostics().last_ortho_top == 240.0f);
 
     std::cout << "\n[PASS] All Native C++ ARM32-on-AArch64 engine tests PASSED 100%!" << std::endl;
     return 0;

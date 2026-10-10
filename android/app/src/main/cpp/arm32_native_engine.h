@@ -39,8 +39,8 @@ public:
 
     // Host hooks & trampolines
     uint32_t register_host_hook(const std::string& name, HostHookFn fn);
+    uint32_t get_or_create_hook(const std::string& name);
     void setup_default_libc_hooks();
-
     // Function execution
     uint32_t call_function(uint32_t target_vaddr, const std::vector<uint32_t>& args, uint64_t timeout_us = 2000000);
     static void on_code_hook(uc_engine* uc, uint64_t address, uint32_t size, void* user_data);
