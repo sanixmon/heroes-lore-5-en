@@ -1,0 +1,12 @@
+# Large binaries and unpacked APK directories
+*.apk
+*.keystore
+*.jks
+*.idsig
+apktool_orig/
+apktool_modern/
+build/
+extracted/
+__pycache__/
+*.pyc
+.pytest_cache/

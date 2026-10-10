@@ -1,0 +1,82 @@
+{
+  "valid": true,
+  "batches_checked": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "total_checked_slots": 15241,
+  "translated_slots": 14792,
+  "untranslated_slots": 0,
+  "empty_source_slots": 449,
+  "compile_verified_files": 315,
+  "error_count": 0,
+  "warning_count": 9,
+  "errors": [],
+  "warnings": [
+    {
+      "type": "word_wider_than_box",
+      "id": "c/csv/mission_text.dat#35:text",
+      "word": "Hugin/Lilith/Gimir/Skoll/Isir.",
+      "word_px": 180,
+      "max_width_px": 130
+    },
+    {
+      "type": "word_wider_than_box",
+      "id": "c/csv/mission_text.dat#36:text",
+      "word": "Munin/Gram/Sjofn/Od/Arcane.",
+      "word_px": 162,
+      "max_width_px": 130
+    },
+    {
+      "type": "word_wider_than_box",
+      "id": "c/csv/mission_text.dat#37:text",
+      "word": "Baldr/Asgard/Alsvid/Bor/Freki.",
+      "word_px": 180,
+      "max_width_px": 130
+    },
+    {
+      "type": "word_wider_than_box",
+      "id": "c/csv/mission_text.dat#38:text",
+      "word": "Geri/Einherjar/Aegir/Grand/Fenrir.",
+      "word_px": 204,
+      "max_width_px": 130
+    },
+    {
+      "type": "word_wider_than_box",
+      "id": "c/csv/mission_text.dat#39:text",
+      "word": "Gjallarhorn/Dielun/Fatal/Brid/Vide.",
+      "word_px": 210,
+      "max_width_px": 130
+    },
+    {
+      "type": "word_wider_than_box",
+      "id": "c/csv/mission_text.dat#40:text",
+      "word": "Raven/Ferdin/Blinka/Alas/Aether.",
+      "word_px": 192,
+      "max_width_px": 130
+    },
+    {
+      "type": "word_wider_than_box",
+      "id": "c/csv/mission_text.dat#49:text",
+      "word": "Justice/Nightmare/Wheel",
+      "word_px": 138,
+      "max_width_px": 130
+    },
+    {
+      "type": "word_wider_than_box",
+      "id": "c/csv2/help_android_skt.dat#19:body",
+      "word": "support@eamobile.co.kr",
+      "word_px": 132,
+      "max_width_px": 130
+    },
+    {
+      "type": "word_wider_than_box",
+      "id": "c/csv2/help_skt.dat#19:body",
+      "word": "support@eamobile.co.kr",
+      "word_px": 132,
+      "max_width_px": 130
+    }
+  ]
+}
