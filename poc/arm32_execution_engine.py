@@ -199,12 +199,17 @@ class Arm32ExecutionEngine:
         # Flush modified relocations back into Unicorn memory
         self.uc.mem_write(self.base_addr, bytes(self.loader.memory))
 
-    def call_function(self, func_name: str, *args: int, timeout_us: int = 2000000) -> int:
-        if func_name not in self.loader.dynsyms:
-            raise KeyError(f"Symbol {func_name!r} not found in dynamic symbols")
-        vaddr, _ = self.loader.dynsyms[func_name]
-        func_target = self.base_addr + vaddr
-
+    def call_function(self, func_target_or_name: str | int, *args: int, timeout_us: int = 2000000) -> int:
+        func_name = str(func_target_or_name)
+        if isinstance(func_target_or_name, int):
+            func_target = func_target_or_name
+        elif func_target_or_name.startswith("0x"):
+            func_target = int(func_target_or_name, 16)
+        else:
+            if func_target_or_name not in self.loader.dynsyms:
+                raise KeyError(f"Symbol {func_target_or_name!r} not found in dynamic symbols")
+            vaddr, _ = self.loader.dynsyms[func_target_or_name]
+            func_target = self.base_addr + vaddr
         # 1. Set CPSR to user mode (ARM mode, not Thumb) first so banked SP/LR are active
         self.uc.reg_write(UC_ARM_REG_CPSR, 0x10)
 

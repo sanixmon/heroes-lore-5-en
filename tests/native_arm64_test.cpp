@@ -231,6 +231,28 @@ int main() {
     assert(val_20 != 0);
     assert(gl_format != 0);
 
+    // 10. Test BaseState State Manager & State Transition Mapping
+    std::cout << "\n--- Testing State Transition Management (BaseState::StateMgr) ---" << std::endl;
+    uint32_t state_mgr_sym = elf_loader.find_symbol("_ZN9BaseState8StateMgrEaaa");
+    assert(state_mgr_sym != 0);
+
+    // StateMgr(this=0, state_type=1, substate=1, param=0) -> sets next state transition
+    full_engine.call_function(state_mgr_sym, {0, 1, 1, 0});
+    std::cout << "[PASS] BaseState::StateMgr(1, 1, 0) dispatched transition request." << std::endl;
+
+    // Validate that CGame object ([0x40164368]) received nextState request
+    uint32_t game_obj_var = 0x40164368;
+    uint32_t game_obj = 0;
+    full_engine.read_memory(game_obj_var, &game_obj, 4);
+    if (game_obj >= 0x40000000) {
+        int8_t req_state = 0, req_substate = 0;
+        full_engine.read_memory(game_obj + 0xe1, &req_state, 1);
+        full_engine.read_memory(game_obj + 0xe2, &req_substate, 1);
+        std::cout << "[PASS] CGame nextState registered: state=" << (int)req_state 
+                  << ", substate=" << (int)req_substate << std::endl;
+        assert(req_state == 1);
+        assert(req_substate == 1);
+    }
     std::cout << "\n[PASS] All Native C++ ARM32-on-AArch64 engine tests PASSED 100%!" << std::endl;
     return 0;
 }

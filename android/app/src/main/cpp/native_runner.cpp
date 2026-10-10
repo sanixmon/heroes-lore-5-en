@@ -288,6 +288,20 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnSurfaceCreated(
             g_native_engine.write_memory(g_km_instance + 0x624, &w, 4);
             g_native_engine.write_memory(g_km_instance + 0x628, &h, 4);
 
+            // Configure app private storage directory path for persistent save files
+            const char* ext_chars = externalPathStr ? env->GetStringUTFChars(externalPathStr, nullptr) : nullptr;
+            std::string ext_dir = (ext_chars && ext_chars[0] != '\0') ? ext_chars : (!internal_so.empty() ? internal_so.substr(0, internal_so.find_last_of('/')) : "/data/local/tmp");
+            std::string int_dir = (!internal_so.empty()) ? internal_so.substr(0, internal_so.find_last_of('/')) : ext_dir;
+            if (ext_chars) env->ReleaseStringUTFChars(externalPathStr, ext_chars);
+
+            uint32_t int_dir_ptr = g_native_engine.allocate_heap(int_dir.size() + 1, 4);
+            g_native_engine.write_memory(int_dir_ptr, int_dir.c_str(), int_dir.size() + 1);
+            g_native_engine.write_memory(g_km_instance + 0x540, &int_dir_ptr, 4);
+
+            uint32_t ext_dir_ptr = g_native_engine.allocate_heap(ext_dir.size() + 1, 4);
+            g_native_engine.write_memory(ext_dir_ptr, ext_dir.c_str(), ext_dir.size() + 1);
+            g_native_engine.write_memory(g_km_instance + 0x544, &ext_dir_ptr, 4);
+
             // Initialize 2D screen GLES states
             uint32_t init2d_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager12init2DScreenEv");
             if (init2d_sym != 0) {
@@ -301,7 +315,7 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnSurfaceCreated(
             }
 
             g_engine_ready = true;
-            g_last_frame_status = "Engine ready, primaryScreen texture created";
+            g_last_frame_status = "Engine ready, primaryScreen created, storage paths mapped";
         } else {
             g_last_frame_status = "Singleton allocation failed";
         }
