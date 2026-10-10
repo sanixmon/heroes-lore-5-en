@@ -205,21 +205,20 @@ class Arm32ExecutionEngine:
         vaddr, _ = self.loader.dynsyms[func_name]
         func_target = self.base_addr + vaddr
 
-        # 1. Setup arguments in R0-R3
+        # 1. Set CPSR to user mode (ARM mode, not Thumb) first so banked SP/LR are active
+        self.uc.reg_write(UC_ARM_REG_CPSR, 0x10)
+
+        # 2. Setup arguments in R0-R3
         regs = [UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3]
         for idx in range(min(4, len(args))):
             self.uc.reg_write(regs[idx], args[idx] & 0xFFFFFFFF)
 
-        # 2. Setup Stack: 8-byte aligned per ARM EABI
+        # 3. Setup Stack: 8-byte aligned per ARM EABI
         sp = STACK_BASE + STACK_SIZE - 0x1000
         self.uc.reg_write(UC_ARM_REG_SP, sp)
 
-        # 3. Setup Link Register (LR) to return to EXIT_MAGIC_ADDR
+        # 4. Setup Link Register (LR) to return to EXIT_MAGIC_ADDR
         self.uc.reg_write(UC_ARM_REG_LR, EXIT_MAGIC_ADDR)
-
-        # 4. Set CPSR to user mode (ARM mode, not Thumb)
-        self.uc.reg_write(UC_ARM_REG_CPSR, 0x10)
-
         # 5. Start emulation from func_target until EXIT_MAGIC_ADDR
         try:
             self.uc.emu_start(func_target, 0, timeout=timeout_us)

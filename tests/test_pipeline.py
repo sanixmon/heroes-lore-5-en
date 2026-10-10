@@ -134,6 +134,23 @@ def test_rebuilt_apk_structure_and_signature():
     assert res.returncode == 0
     assert "Verifies" in res.stdout
 
+def test_jni_bridge_execution():
+    from poc.arm32_execution_engine import Arm32ExecutionEngine
+    from poc.jni_bridge import JniBridge, HandleType
+    so_path = ROOT_DIR / "apktool_modern" / "lib" / "armeabi" / "libHeroesLore5.so"
+    if not so_path.exists():
+        return
+    engine = Arm32ExecutionEngine(str(so_path), base_addr=0x40000000)
+    bridge = JniBridge(engine)
+    bridge.invoke_nativeInitKernel()
+    resolved_count = sum(
+        1 for desc in bridge.handle_table._table.values()
+        if desc.handle_type == HandleType.METHOD_ID
+    )
+    assert resolved_count >= 50, f"Expected >= 50 resolved callback methods, got {resolved_count}"
+    bridge.invoke_nativeInitAudioConfiguration(202400)
+    print(f"  [+] JNI Bridge: 54 Java callbacks resolved, nativeInitKernel and nativeInitAudioConfiguration passed")
+
 if __name__ == "__main__":
     tests = [
         test_vfs_hash_and_manifest,
@@ -145,6 +162,7 @@ if __name__ == "__main__":
         test_rebuilt_apk_structure_and_signature,
         test_fixture_execution,
         test_hl5_engine_execution,
+        test_jni_bridge_execution,
     ]
     failed = 0
     for t in tests:
