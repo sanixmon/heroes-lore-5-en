@@ -31,9 +31,13 @@ hl5::Arm32NativeEngine g_native_engine;
 hl5::Arm32ElfLoader    g_elf_loader;
 hl5::GlesBridge        g_gles_bridge;
 hl5::VfsAdapter        g_vfs_adapter;
+hl5::TypedHandleTable  g_handle_table;
 std::mutex             g_engine_mutex;
 uint32_t               g_km_instance = 0;
 uint32_t               g_game_instance = 0;
+uint32_t               g_jnienv32_ptr = 0;
+uint32_t               g_javavm32_ptr = 0;
+uint32_t               g_thiz_handle = 0;
 int32_t                g_surface_w = 400;
 int32_t                g_surface_h = 240;
 uint64_t               g_frame_counter = 0;
@@ -49,6 +53,10 @@ int32_t                g_current_game_substate = -1;
 int32_t                g_current_game_popup = -1;
 bool                   g_engine_ready = false;
 std::string            g_last_frame_status = "Awaiting first frame";
+
+// Unique asset name mapping (mirrors CletEntry.getUniqueNumberFromStrings / getUniqueAssetNameFromID)
+std::unordered_map<std::string, int> g_name_to_id;
+std::unordered_map<int, std::string> g_id_to_name;
 
 void native_signal_handler(int sig, siginfo_t* info, void* /*context*/) {
     LOGE("FATAL NATIVE SIGNAL CAUGHT: signal=%d, si_code=%d, fault_addr=%p",
@@ -70,6 +78,289 @@ void install_signal_handlers() {
     sigaction(SIGFPE,  &sa, nullptr);
     sigaction(SIGILL,  &sa, nullptr);
     sigaction(SIGABRT, &sa, nullptr);
+}
+
+// Write a trampoline address into the 32-bit JNI vtable at the given byte offset
+void register_jni_slot(uint32_t table_vaddr, uint32_t offset,
+                        const std::string& name, hl5::HostHookFn fn) {
+    uint32_t t_addr = g_native_engine.register_host_hook(name, std::move(fn));
+    g_native_engine.write_memory(table_vaddr + offset, &t_addr, 4);
+}
+
+// Build the complete 32-bit JNIEnv* and JavaVM* vtables in guest memory,
+// register all JNI function trampolines the guest calls during startup.
+void setup_jni_bridge() {
+    // --- JNINativeInterface table (256 function pointers × 4 bytes = 1024) ---
+    const uint32_t table_size = 1024;
+    uint32_t table_vaddr = g_native_engine.allocate_heap(table_size, 4096);
+    // Zero-initialize
+    std::vector<uint8_t> zeros(table_size, 0);
+    g_native_engine.write_memory(table_vaddr, zeros.data(), table_size);
+
+    // JNIEnv struct: pointer to table_vaddr
+    g_jnienv32_ptr = g_native_engine.allocate_heap(8, 4);
+    g_native_engine.write_memory(g_jnienv32_ptr, &table_vaddr, 4);
+
+    // --- JNIInvokeInterface table (32 function pointers × 4 bytes = 128) ---
+    uint32_t vm_table_vaddr = g_native_engine.allocate_heap(128, 4096);
+    std::vector<uint8_t> vm_zeros(128, 0);
+    g_native_engine.write_memory(vm_table_vaddr, vm_zeros.data(), 128);
+
+    g_javavm32_ptr = g_native_engine.allocate_heap(8, 4);
+    g_native_engine.write_memory(g_javavm32_ptr, &vm_table_vaddr, 4);
+
+    // --- Register JNIEnv function trampolines ---
+
+    // GetVersion (offset 0x10): returns JNI_VERSION_1_6
+    register_jni_slot(table_vaddr, 0x10, "JNIEnv::GetVersion",
+        [](const std::vector<uint32_t>&) -> uint32_t { return 0x00010006; });
+
+    // FindClass (offset 0x18)
+    register_jni_slot(table_vaddr, 0x18, "JNIEnv::FindClass",
+        [](const std::vector<uint32_t>& args) -> uint32_t {
+            std::string cls_name = g_native_engine.read_string(args[1]);
+            return g_handle_table.allocate(hl5::HandleType::LOCAL_REF, nullptr, cls_name);
+        });
+
+    // NewGlobalRef (offset 0x54)
+    register_jni_slot(table_vaddr, 0x54, "JNIEnv::NewGlobalRef",
+        [](const std::vector<uint32_t>& args) -> uint32_t {
+            uint32_t obj = args[1];
+            if (obj == 0) return 0;
+            auto* desc = g_handle_table.find_descriptor(obj);
+            return g_handle_table.allocate(hl5::HandleType::GLOBAL_REF,
+                desc ? desc->host_ptr : nullptr, desc ? desc->class_name : "");
+        });
+
+    // DeleteGlobalRef (offset 0x58)
+    register_jni_slot(table_vaddr, 0x58, "JNIEnv::DeleteGlobalRef",
+        [](const std::vector<uint32_t>& args) -> uint32_t {
+            g_handle_table.delete_ref(args[1], true);
+            return 0;
+        });
+
+    // DeleteLocalRef (offset 0x5C)
+    register_jni_slot(table_vaddr, 0x5C, "JNIEnv::DeleteLocalRef",
+        [](const std::vector<uint32_t>& args) -> uint32_t {
+            g_handle_table.delete_ref(args[1], false);
+            return 0;
+        });
+
+    // GetStaticMethodID (offset 0x1C4)
+    register_jni_slot(table_vaddr, 0x1C4, "JNIEnv::GetStaticMethodID",
+        [](const std::vector<uint32_t>& args) -> uint32_t {
+            auto* cls_desc = g_handle_table.find_descriptor(args[1]);
+            std::string cls_name = cls_desc ? cls_desc->class_name : "";
+            std::string name = g_native_engine.read_string(args[2]);
+            std::string sig = g_native_engine.read_string(args[3]);
+            return g_handle_table.allocate(hl5::HandleType::METHOD_ID, nullptr, cls_name, sig + "|" + name);
+        });
+
+    // Helper lambda to resolve a method key and dispatch to built-in handlers
+    auto dispatch_static = [](uint32_t mid_handle, const std::vector<uint32_t>& extra_args) -> std::pair<bool, uint32_t> {
+        auto* desc = g_handle_table.find_descriptor(mid_handle);
+        if (!desc) return {false, 0};
+        // desc->signature format: "sig|name", desc->class_name = class
+        std::string combined = desc->signature;
+        size_t sep = combined.find('|');
+        std::string sig = (sep != std::string::npos) ? combined.substr(0, sep) : "";
+        std::string name = (sep != std::string::npos) ? combined.substr(sep + 1) : "";
+        std::string cls = desc->class_name;
+
+        // Built-in Java method stubs:
+        if (cls == "co/kr/eamobile/CletEntry") {
+            if (name == "getUniqueNumberFromStrings" && extra_args.size() >= 1) {
+                // Resolve string handle → lookup/assign unique ID
+                auto* str_desc = g_handle_table.find_descriptor(extra_args[0]);
+                std::string asset_name = str_desc ? str_desc->class_name : "";
+                auto it = g_name_to_id.find(asset_name);
+                if (it == g_name_to_id.end()) {
+                    int idx = static_cast<int>(g_name_to_id.size()) + 1;
+                    g_name_to_id[asset_name] = idx;
+                    g_id_to_name[idx] = asset_name;
+                    return {true, static_cast<uint32_t>(idx)};
+                }
+                return {true, static_cast<uint32_t>(it->second)};
+            }
+            if (name == "getUniqueAssetNameFromID" && extra_args.size() >= 1) {
+                int id = static_cast<int>(extra_args[0]);
+                auto it = g_id_to_name.find(id);
+                std::string result = (it != g_id_to_name.end()) ? it->second : "";
+                uint32_t str_ptr = g_native_engine.write_string(result);
+                uint32_t h = g_handle_table.allocate(hl5::HandleType::LOCAL_REF, nullptr, result);
+                // Also write string pointer in guest for GetStringUTFChars
+                return {true, h};
+            }
+            if (name == "getMin") {
+                // Return IMEI-like string
+                uint32_t str_ptr = g_native_engine.write_string("01000000000");
+                uint32_t h = g_handle_table.allocate(hl5::HandleType::LOCAL_REF,
+                    reinterpret_cast<void*>(static_cast<uintptr_t>(str_ptr)), "01000000000");
+            }
+            if (name == "freeMemory") return {true, 64 * 1024 * 1024};
+            if (name == "totalMemory") return {true, 128 * 1024 * 1024};
+            if (name == "isNetworkAvailable") return {true, 0};
+        }
+        return {false, 0};
+    };
+
+    // CallStaticObjectMethod (offset 0x1D4)
+    register_jni_slot(table_vaddr, 0x1D4, "JNIEnv::CallStaticObjectMethod",
+        [dispatch_static](const std::vector<uint32_t>& args) -> uint32_t {
+            auto [handled, val] = dispatch_static(args[2], {args.begin() + 3, args.end()});
+            return handled ? val : 0;
+        });
+
+    // CallStaticObjectMethodV (offset 0x1CC) — va_list variant used by nativeInitKernel
+    register_jni_slot(table_vaddr, 0x1CC, "JNIEnv::CallStaticObjectMethodV",
+        [dispatch_static](const std::vector<uint32_t>& args) -> uint32_t {
+            // args[3] = va_list pointer; unpack up to 8 words
+            std::vector<uint32_t> va;
+            uint32_t va_ptr = args[3];
+            if (va_ptr >= 0x10000 && va_ptr <= 0x7FFFFFFF) {
+                uint32_t buf[8] = {0};
+                g_native_engine.read_memory(va_ptr, buf, sizeof(buf));
+                for (int i = 0; i < 8; ++i) va.push_back(buf[i]);
+            }
+            auto [handled, val] = dispatch_static(args[2], va);
+            return handled ? val : 0;
+        });
+
+    // CallStaticIntMethod (offset 0x1EC)
+    register_jni_slot(table_vaddr, 0x1EC, "JNIEnv::CallStaticIntMethod",
+        [dispatch_static](const std::vector<uint32_t>& args) -> uint32_t {
+            auto [handled, val] = dispatch_static(args[2], {args.begin() + 3, args.end()});
+            return handled ? val : 0;
+        });
+
+    // CallStaticIntMethodV (offset 0x208) — va_list variant
+    register_jni_slot(table_vaddr, 0x208, "JNIEnv::CallStaticIntMethodV",
+        [dispatch_static](const std::vector<uint32_t>& args) -> uint32_t {
+            std::vector<uint32_t> va;
+            uint32_t va_ptr = args[3];
+            if (va_ptr >= 0x10000 && va_ptr <= 0x7FFFFFFF) {
+                uint32_t buf[8] = {0};
+                g_native_engine.read_memory(va_ptr, buf, sizeof(buf));
+                for (int i = 0; i < 8; ++i) va.push_back(buf[i]);
+            }
+            auto [handled, val] = dispatch_static(args[2], va);
+            return handled ? val : 0;
+        });
+
+    // CallStaticLongMethodV (offset 0x214)
+    register_jni_slot(table_vaddr, 0x214, "JNIEnv::CallStaticLongMethodV",
+        [dispatch_static](const std::vector<uint32_t>& args) -> uint32_t {
+            std::vector<uint32_t> va;
+            uint32_t va_ptr = args[3];
+            if (va_ptr >= 0x10000 && va_ptr <= 0x7FFFFFFF) {
+                uint32_t buf[8] = {0};
+                g_native_engine.read_memory(va_ptr, buf, sizeof(buf));
+                for (int i = 0; i < 8; ++i) va.push_back(buf[i]);
+            }
+            auto [handled, val] = dispatch_static(args[2], va);
+            return handled ? val : 0;
+        });
+
+    // CallStaticVoidMethod (offset 0x204)
+    register_jni_slot(table_vaddr, 0x204, "JNIEnv::CallStaticVoidMethod",
+        [dispatch_static](const std::vector<uint32_t>& args) -> uint32_t {
+            dispatch_static(args[2], {args.begin() + 3, args.end()});
+            return 0;
+        });
+
+    // CallStaticVoidMethodV (offset 0x238) — va_list variant
+    register_jni_slot(table_vaddr, 0x238, "JNIEnv::CallStaticVoidMethodV",
+        [dispatch_static](const std::vector<uint32_t>& args) -> uint32_t {
+            std::vector<uint32_t> va;
+            uint32_t va_ptr = args[3];
+            if (va_ptr >= 0x10000 && va_ptr <= 0x7FFFFFFF) {
+                uint32_t buf[8] = {0};
+                g_native_engine.read_memory(va_ptr, buf, sizeof(buf));
+                for (int i = 0; i < 8; ++i) va.push_back(buf[i]);
+            }
+            dispatch_static(args[2], va);
+            return 0;
+        });
+
+    // NewStringUTF (offset 0x294)
+    register_jni_slot(table_vaddr, 0x294, "JNIEnv::NewStringUTF",
+        [](const std::vector<uint32_t>& args) -> uint32_t {
+            std::string s = g_native_engine.read_string(args[1]);
+            // Store the guest string pointer as host_ptr for GetStringUTFChars
+            return g_handle_table.allocate(hl5::HandleType::LOCAL_REF,
+                reinterpret_cast<void*>(static_cast<uintptr_t>(args[1])), s);
+        });
+
+    // Secondary NewStringUTF slot at 0x29C (observed in some call paths)
+    register_jni_slot(table_vaddr, 0x29C, "JNIEnv::NewStringUTF_29C",
+        [](const std::vector<uint32_t>& args) -> uint32_t {
+            std::string s = g_native_engine.read_string(args[1]);
+            return g_handle_table.allocate(hl5::HandleType::LOCAL_REF,
+                reinterpret_cast<void*>(static_cast<uintptr_t>(args[1])), s);
+        });
+
+    // GetStringUTFChars (offset 0x2A4)
+    register_jni_slot(table_vaddr, 0x2A4, "JNIEnv::GetStringUTFChars",
+        [](const std::vector<uint32_t>& args) -> uint32_t {
+            uint32_t str_handle = args[1];
+            auto* desc = g_handle_table.find_descriptor(str_handle);
+            if (!desc) return 0;
+            // If host_ptr holds original guest string address, return it
+            uintptr_t guest_ptr = reinterpret_cast<uintptr_t>(desc->host_ptr);
+            if (guest_ptr >= 0x10000 && guest_ptr < 0x80000000) {
+                return static_cast<uint32_t>(guest_ptr);
+            }
+            // Otherwise write class_name (the string content) to guest memory
+            return g_native_engine.write_string(desc->class_name);
+        });
+
+    // ReleaseStringUTFChars (offset 0x2A8) — no-op
+    register_jni_slot(table_vaddr, 0x2A8, "JNIEnv::ReleaseStringUTFChars",
+        [](const std::vector<uint32_t>&) -> uint32_t { return 0; });
+
+    // GetJavaVM (offset 0x36C)
+    register_jni_slot(table_vaddr, 0x36C, "JNIEnv::GetJavaVM",
+        [](const std::vector<uint32_t>& args) -> uint32_t {
+            uint32_t vm_out = args[1];
+            if (vm_out != 0) {
+                g_native_engine.write_memory(vm_out, &g_javavm32_ptr, 4);
+            }
+            return 0; // JNI_OK
+        });
+
+    // GetFieldID (offset 0x178)
+    register_jni_slot(table_vaddr, 0x178, "JNIEnv::GetFieldID",
+        [](const std::vector<uint32_t>& args) -> uint32_t {
+            auto* cls_desc = g_handle_table.find_descriptor(args[1]);
+            std::string cls_name = cls_desc ? cls_desc->class_name : "";
+            std::string name = g_native_engine.read_string(args[2]);
+            std::string sig = g_native_engine.read_string(args[3]);
+            return g_handle_table.allocate(hl5::HandleType::FIELD_ID, nullptr, cls_name, name);
+        });
+
+    // GetIntField (offset 0x190) — returns fd descriptor for FileDescriptor objects
+    register_jni_slot(table_vaddr, 0x190, "JNIEnv::GetIntField",
+        [](const std::vector<uint32_t>& args) -> uint32_t {
+            auto* obj_desc = g_handle_table.find_descriptor(args[1]);
+            if (!obj_desc) return 0;
+            // If class_name starts with "fd:", return the numeric fd value
+            const std::string& cn = obj_desc->class_name;
+            if (cn.substr(0, 3) == "fd:") {
+                return static_cast<uint32_t>(std::stoi(cn.substr(3)));
+            }
+            return 0;
+        });
+
+    // --- JavaVM::GetEnv (vm_table offset 0x18) ---
+    register_jni_slot(vm_table_vaddr, 0x18, "JavaVM::GetEnv",
+        [](const std::vector<uint32_t>& args) -> uint32_t {
+            if (args[1] != 0) {
+                g_native_engine.write_memory(args[1], &g_jnienv32_ptr, 4);
+            }
+            return 0; // JNI_OK
+        });
+
+    LOGI("JNI bridge vtable created: JNIEnv*=0x%08x, JavaVM*=0x%08x", g_jnienv32_ptr, g_javavm32_ptr);
 }
 }
 extern "C" {
@@ -284,6 +575,8 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnSurfaceCreated(
     bool gles_ok = g_gles_bridge.initialize();
     g_gles_bridge.reset_diagnostics();
     LOGI("[MILESTONE 2/9 RESULT] GLES Bridge result: %d (provider: %s)", gles_ok, g_gles_bridge.gles_provider_name());
+
+    // 2. Initialize ARM32 Unicorn CPU Engine
     LOGI("[MILESTONE 3/9] Initializing ARM32 Unicorn CPU Engine");
     if (!g_native_engine.initialize()) {
         LOGE("[MILESTONE 3/9 FAIL] Engine initialization failed on GLThread");
@@ -291,14 +584,24 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnSurfaceCreated(
         return;
     }
     LOGI("[MILESTONE 3/9 PASS] Native ARM32 Unicorn CPU Engine initialized successfully on GLThread");
-    // 3. Register GLES hooks
-    g_gles_bridge.register_with_engine(g_native_engine);
 
-    // 4. Try loading libHeroesLore5.so from candidate locations
+    // 3. Register GLES hooks + VFS hooks
+    g_gles_bridge.register_with_engine(g_native_engine);
+    g_vfs_adapter.register_with_engine(g_native_engine);
+
+    // 4. Load libHeroesLore5.so
     LOGI("[MILESTONE 4/9] Locating and loading ARM32 guest ELF libHeroesLore5.so");
     const char* int_chars = internalPathStr ? env->GetStringUTFChars(internalPathStr, nullptr) : nullptr;
-    std::string internal_so = (int_chars && int_chars[0] != '\0') ? (std::string(int_chars) + "/libHeroesLore5.so") : "";
+    std::string int_dir_str = (int_chars && int_chars[0] != '\0') ? int_chars : "";
     if (int_chars) env->ReleaseStringUTFChars(internalPathStr, int_chars);
+
+    const char* ext_chars = externalPathStr ? env->GetStringUTFChars(externalPathStr, nullptr) : nullptr;
+    std::string ext_dir_str = (ext_chars && ext_chars[0] != '\0') ? ext_chars : "";
+    if (ext_chars) env->ReleaseStringUTFChars(externalPathStr, ext_chars);
+
+    std::string internal_so = int_dir_str.empty() ? "" : (int_dir_str + "/libHeroesLore5.so");
+    std::string int_dir = int_dir_str.empty() ? "/data/local/tmp" : int_dir_str;
+    std::string ext_dir = ext_dir_str.empty() ? int_dir : ext_dir_str;
 
     const char* so_candidates[] = {
         internal_so.empty() ? nullptr : internal_so.c_str(),
@@ -321,59 +624,183 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnSurfaceCreated(
         }
     }
 
-    if (loaded) {
-        LOGI("[MILESTONE 5/9] Initializing Game Engine singleton & display states");
-        uint32_t make_inst_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager12makeInstanceEv");
-        if (make_inst_sym != 0) {
-            LOGI("Calling MIDASKernelManager::makeInstance() at 0x%08x", make_inst_sym);
-            g_km_instance = g_native_engine.call_function(make_inst_sym, {});
-            LOGI("MIDASKernelManager singleton created at 0x%08x", g_km_instance);
-        }
-        if (g_km_instance != 0) {
-            // Set initial screen dimensions (400x240)
-            uint32_t w = static_cast<uint32_t>(g_surface_w);
-            uint32_t h = static_cast<uint32_t>(g_surface_h);
-            g_native_engine.write_memory(g_km_instance + 0x624, &w, 4);
-            g_native_engine.write_memory(g_km_instance + 0x628, &h, 4);
-
-            // Configure app private storage directory path for persistent save files
-            const char* ext_chars = externalPathStr ? env->GetStringUTFChars(externalPathStr, nullptr) : nullptr;
-            std::string ext_dir = (ext_chars && ext_chars[0] != '\0') ? ext_chars : (!internal_so.empty() ? internal_so.substr(0, internal_so.find_last_of('/')) : "/data/local/tmp");
-            std::string int_dir = (!internal_so.empty()) ? internal_so.substr(0, internal_so.find_last_of('/')) : ext_dir;
-            if (ext_chars) env->ReleaseStringUTFChars(externalPathStr, ext_chars);
-
-            uint32_t int_dir_ptr = g_native_engine.allocate_heap(int_dir.size() + 1, 4);
-            g_native_engine.write_memory(int_dir_ptr, int_dir.c_str(), int_dir.size() + 1);
-            g_native_engine.write_memory(g_km_instance + 0x540, &int_dir_ptr, 4);
-
-            uint32_t ext_dir_ptr = g_native_engine.allocate_heap(ext_dir.size() + 1, 4);
-            g_native_engine.write_memory(ext_dir_ptr, ext_dir.c_str(), ext_dir.size() + 1);
-            g_native_engine.write_memory(g_km_instance + 0x544, &ext_dir_ptr, 4);
-
-            // Initialize 2D screen GLES states
-            uint32_t init2d_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager12init2DScreenEv");
-            if (init2d_sym != 0) {
-                LOGI("Calling MIDASKernelManager::init2DScreen() at 0x%08x", init2d_sym);
-                g_native_engine.call_function(init2d_sym, {g_km_instance});
-            }
-
-            // Create primaryScreen texture and set up vertex buffers
-            uint32_t create_tex_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager14createTexturesEv");
-            if (create_tex_sym != 0) {
-                LOGI("Calling MIDASKernelManager::createTextures() at 0x%08x", create_tex_sym);
-                g_native_engine.call_function(create_tex_sym, {g_km_instance});
-            }
-
-            g_engine_ready = true;
-            g_last_frame_status = "Engine ready, primaryScreen created, storage paths mapped";
-            LOGI("Engine startup sequence complete, ready for frame rendering");
-        } else {
-            LOGE("Singleton allocation failed");
-            g_last_frame_status = "Singleton allocation failed";
-        }
-    } else {
+    if (!loaded) {
         LOGE("ELF binary not found or failed to load");
         g_last_frame_status = "ELF binary not found or failed to load";
+        return;
+    }
+
+    // 5. Build JNI bridge vtable in guest memory
+    LOGI("[MILESTONE 5/9] Setting up JNI bridge vtable");
+    setup_jni_bridge();
+
+    // 6. Execute authentic boot sequence (mirrors CletEntry.smali startup)
+    LOGI("[MILESTONE 6/9] Executing authentic guest boot sequence");
+    try {
+        // Stage 1: nativeInitKernel — creates AndroidService singleton, caches Java method IDs
+        g_handle_table.push_local_frame();
+        g_thiz_handle = g_handle_table.allocate(hl5::HandleType::LOCAL_REF, nullptr, "CletEntry_instance");
+        uint32_t init_kernel_sym = g_elf_loader.find_symbol("Java_co_kr_eamobile_CletEntry_nativeInitKernel");
+        if (init_kernel_sym != 0) {
+            LOGI("[BOOT 1/7] nativeInitKernel at 0x%08x", init_kernel_sym);
+            g_native_engine.call_function(init_kernel_sym, {g_jnienv32_ptr, g_thiz_handle}, 10000000);
+            LOGI("[BOOT 1/7] nativeInitKernel complete");
+        } else {
+            LOGW("[BOOT 1/7] nativeInitKernel symbol not found — skipping");
+        }
+        g_handle_table.pop_local_frame();
+
+        // Stage 2: nativeInitDisplay — configures screen dimensions, color depth, magnification
+        g_handle_table.push_local_frame();
+        g_thiz_handle = g_handle_table.allocate(hl5::HandleType::LOCAL_REF, nullptr, "CletEntry_instance");
+        uint32_t init_display_sym = g_elf_loader.find_symbol("Java_co_kr_eamobile_CletEntry_nativeInitDisplay");
+        if (init_display_sym != 0) {
+            // Magnification = 2.0f packed as uint32
+            float mag = 2.0f;
+            uint32_t mag_bits = 0;
+            memcpy(&mag_bits, &mag, sizeof(float));
+
+            LOGI("[BOOT 2/7] nativeInitDisplay at 0x%08x (800x480 → 400x240 @ 2.0x mag)", init_display_sym);
+            g_native_engine.call_function(init_display_sym, {
+                g_jnienv32_ptr, g_thiz_handle,
+                800, 480,        // screenW, screenH
+                5, 6, 5, 0,      // R, G, B, A bits (RGB565)
+                400, 240, 0, 0,  // wipiW, wipiH, marginX, marginY
+                0, mag_bits, 0, 0, // wipiColor, magnification, filterType, viewMode
+                0, 0             // useSublayer, sublayerPixel
+            }, 10000000);
+            LOGI("[BOOT 2/7] nativeInitDisplay complete");
+        } else {
+            LOGW("[BOOT 2/7] nativeInitDisplay symbol not found — using manual init");
+            uint32_t make_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager12makeInstanceEv");
+            if (make_sym) g_km_instance = g_native_engine.call_function(make_sym, {});
+            if (g_km_instance != 0) {
+                uint32_t w = 400, h = 240;
+                g_native_engine.write_memory(g_km_instance + 0x624, &w, 4);
+                g_native_engine.write_memory(g_km_instance + 0x628, &h, 4);
+                uint32_t init2d = g_elf_loader.find_symbol("_ZN18MIDASKernelManager12init2DScreenEv");
+                if (init2d) g_native_engine.call_function(init2d, {g_km_instance});
+                uint32_t tex = g_elf_loader.find_symbol("_ZN18MIDASKernelManager14createTexturesEv");
+                if (tex) g_native_engine.call_function(tex, {g_km_instance});
+            }
+        }
+        g_handle_table.pop_local_frame();
+
+        // Get km_instance after nativeInitDisplay (it calls makeInstance internally)
+        uint32_t get_inst_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager11getInstanceEv");
+        if (get_inst_sym != 0) {
+            g_km_instance = g_native_engine.call_function(get_inst_sym, {});
+            LOGI("MIDASKernelManager singleton at 0x%08x", g_km_instance);
+        }
+
+        // Stage 3: nativeInitFileStorage — sets internal/external storage paths
+        g_handle_table.push_local_frame();
+        g_thiz_handle = g_handle_table.allocate(hl5::HandleType::LOCAL_REF, nullptr, "CletEntry_instance");
+        uint32_t init_fs_sym = g_elf_loader.find_symbol("Java_co_kr_eamobile_CletEntry_nativeInitFileStorage");
+        if (init_fs_sym != 0) {
+            uint32_t int_str_ptr = g_native_engine.write_string(int_dir);
+            uint32_t ext_str_ptr = g_native_engine.write_string(ext_dir);
+            uint32_t int_str_h = g_handle_table.allocate(hl5::HandleType::LOCAL_REF,
+                reinterpret_cast<void*>(static_cast<uintptr_t>(int_str_ptr)), int_dir);
+            uint32_t ext_str_h = g_handle_table.allocate(hl5::HandleType::LOCAL_REF,
+                reinterpret_cast<void*>(static_cast<uintptr_t>(ext_str_ptr)), ext_dir);
+
+            LOGI("[BOOT 3/7] nativeInitFileStorage at 0x%08x (int=%s, ext=%s)", init_fs_sym, int_dir.c_str(), ext_dir.c_str());
+            g_native_engine.call_function(init_fs_sym, {g_jnienv32_ptr, g_thiz_handle, int_str_h, ext_str_h}, 5000000);
+            LOGI("[BOOT 3/7] nativeInitFileStorage complete");
+        }
+        g_handle_table.pop_local_frame();
+
+        // Stage 4: nativeInitVFS — opens and registers data.vfs.mp3 with VFS adapter
+        g_handle_table.push_local_frame();
+        g_thiz_handle = g_handle_table.allocate(hl5::HandleType::LOCAL_REF, nullptr, "CletEntry_instance");
+        uint32_t init_vfs_sym = g_elf_loader.find_symbol("Java_co_kr_eamobile_CletEntry_nativeInitVFS");
+        if (init_vfs_sym != 0) {
+            std::string vfs_paths[] = {
+                int_dir + "/data.vfs.mp3",
+                ext_dir + "/data.vfs.mp3",
+                "apktool_modern/assets/data.vfs.mp3",
+                "/data/local/tmp/data.vfs.mp3"
+            };
+            int vfs_host_fd = -1;
+            off_t vfs_len = 0;
+            for (const auto& path : vfs_paths) {
+                int fd = open(path.c_str(), O_RDONLY);
+                if (fd >= 0) {
+                    struct stat st;
+                    if (fstat(fd, &st) == 0) {
+                        vfs_len = st.st_size;
+                        vfs_host_fd = fd;
+                        LOGI("[BOOT 4/7] Found data.vfs.mp3 at %s (%ld bytes)", path.c_str(), (long)vfs_len);
+                        break;
+                    }
+                    close(fd);
+                }
+            }
+
+            if (vfs_host_fd >= 0) {
+                uint32_t guest_fd = g_vfs_adapter.register_asset(vfs_host_fd, 0, vfs_len);
+                LOGI("[BOOT 4/7] VFS registered: guest_fd=0x%x, len=%ld", guest_fd, (long)vfs_len);
+
+                std::string fd_class = "fd:" + std::to_string(guest_fd);
+                uint32_t fd_handle = g_handle_table.allocate(hl5::HandleType::LOCAL_REF, nullptr, fd_class);
+
+                uint32_t len_low = static_cast<uint32_t>(vfs_len & 0xFFFFFFFF);
+                uint32_t len_high = static_cast<uint32_t>((vfs_len >> 32) & 0xFFFFFFFF);
+
+                LOGI("[BOOT 4/7] nativeInitVFS at 0x%08x", init_vfs_sym);
+                g_native_engine.call_function(init_vfs_sym, {
+                    g_jnienv32_ptr, g_thiz_handle,
+                    fd_handle, 0,
+                    0, 0,
+                    len_low, len_high
+                }, 10000000);
+                LOGI("[BOOT 4/7] nativeInitVFS complete");
+            } else {
+                LOGW("[BOOT 4/7] data.vfs.mp3 not found — VFS not initialized");
+            }
+        }
+        g_handle_table.pop_local_frame();
+
+        // Stage 5: nativeInitAudioConfiguration
+        g_handle_table.push_local_frame();
+        g_thiz_handle = g_handle_table.allocate(hl5::HandleType::LOCAL_REF, nullptr, "CletEntry_instance");
+        uint32_t init_audio_sym = g_elf_loader.find_symbol("Java_co_kr_eamobile_CletEntry_nativeInitAudioConfiguration");
+        if (init_audio_sym != 0) {
+            LOGI("[BOOT 5/7] nativeInitAudioConfiguration at 0x%08x", init_audio_sym);
+            g_native_engine.call_function(init_audio_sym, {g_jnienv32_ptr, g_thiz_handle, 202400}, 5000000);
+            LOGI("[BOOT 5/7] nativeInitAudioConfiguration complete");
+        }
+        g_handle_table.pop_local_frame();
+
+        // Stage 6: nativeStartApp — creates CGame, enters main menu
+        g_handle_table.push_local_frame();
+        g_thiz_handle = g_handle_table.allocate(hl5::HandleType::LOCAL_REF, nullptr, "CletEntry_instance");
+        uint32_t start_app_sym = g_elf_loader.find_symbol("Java_co_kr_eamobile_CletEntry_nativeStartApp");
+        if (start_app_sym != 0) {
+            LOGI("[BOOT 6/7] nativeStartApp at 0x%08x — entering main game initialization", start_app_sym);
+            g_native_engine.call_function(start_app_sym, {g_jnienv32_ptr, g_thiz_handle}, 0);
+            LOGI("[BOOT 6/7] nativeStartApp complete");
+        }
+        g_handle_table.pop_local_frame();
+
+        // Stage 7: Read CGame pointer and verify state
+        uint32_t game_obj = 0;
+        g_native_engine.read_memory(0x40164368, &game_obj, 4);
+        if (game_obj >= 0x40000000) {
+            g_game_instance = game_obj;
+            LOGI("[BOOT 7/7] CGame object at 0x%08x — game world initialized", game_obj);
+        } else {
+            LOGW("[BOOT 7/7] CGame pointer not set (0x%08x) — game may not have fully initialized", game_obj);
+        }
+
+        g_engine_ready = true;
+        g_last_frame_status = "Boot complete: JNI bridge + authentic init sequence";
+        LOGI("[MILESTONE 9/9] Full authentic boot sequence complete, ready for frame rendering");
+
+    } catch (const std::exception& e) {
+        LOGE("Boot sequence failed: %s", e.what());
+        g_last_frame_status = std::string("Boot failed: ") + e.what();
     }
 }
 
@@ -417,7 +844,7 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnDrawFrame(
         uint32_t update_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager12updateScreenEv");
         try {
             if (loop_sym != 0) {
-                g_native_engine.call_function(loop_sym, {0, 0});
+                g_native_engine.call_function(loop_sym, {g_jnienv32_ptr, g_thiz_handle});
             } else if (update_sym != 0) {
                 g_native_engine.call_function(update_sym, {g_km_instance});
             }
@@ -545,7 +972,8 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnTouchEvent(
             // In Unicorn guest execution:
             // R0 = jnienv (0), R1 = thiz (0), R2 = type, R3 = x
             // [sp + 0] = y, [sp + 4] = pointerId
-            g_native_engine.call_function(touch_sym, {0, 0, static_cast<uint32_t>(event_type),
+            g_native_engine.call_function(touch_sym, {g_jnienv32_ptr, g_thiz_handle,
+                                                      static_cast<uint32_t>(event_type),
                                                       static_cast<uint32_t>(game_x),
                                                       static_cast<uint32_t>(game_y),
                                                       static_cast<uint32_t>(pointerId)});

@@ -1,8 +1,10 @@
 #include "vfs_adapter.h"
+#include "arm32_native_engine.h"
 #include <unistd.h>
 #include <fcntl.h>
 #include <cstring>
 #include <algorithm>
+#include <vector>
 
 namespace hl5 {
 
@@ -128,6 +130,53 @@ size_t VfsAdapter::hook_fread(uint32_t guest_ptr, size_t size, size_t nmemb, uin
     return 0;
 }
 
+size_t VfsAdapter::hook_fread(uint32_t guest_ptr, size_t size, size_t nmemb, uint32_t guest_fp, Arm32NativeEngine& engine) {
+    size_t total_bytes = size * nmemb;
+    if (total_bytes == 0) return 0;
+
+    std::vector<uint8_t> buf(total_bytes);
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = fp_table_.find(guest_fp);
+    if (it == fp_table_.end() || it->second->is_closed) {
+        return 0;
+    }
+    auto& stream = it->second;
+
+    off_t remaining = std::max(static_cast<off_t>(0), stream->length - stream->cursor);
+    size_t to_read = std::min(total_bytes, static_cast<size_t>(remaining));
+    if (to_read == 0) return 0;
+
+    lseek(stream->host_fd, stream->start_offset + stream->cursor, SEEK_SET);
+    ssize_t bytes_read = read(stream->host_fd, buf.data(), to_read);
+    if (bytes_read > 0) {
+        stream->cursor += bytes_read;
+        engine.write_memory(guest_ptr, buf.data(), bytes_read);
+        return (size > 0) ? (static_cast<size_t>(bytes_read) / size) : 0;
+    }
+    return 0;
+}
+
+void VfsAdapter::register_with_engine(Arm32NativeEngine& engine) {
+    engine.register_host_hook("dup", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        return hook_dup(args[0]);
+    });
+    engine.register_host_hook("fdopen", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        return hook_fdopen(args[0], "rb");
+    });
+    engine.register_host_hook("fseek", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        return static_cast<uint32_t>(hook_fseek(args[0], static_cast<long>(args[1]), static_cast<int>(args[2])));
+    });
+    engine.register_host_hook("fread", [this, &engine](const std::vector<uint32_t>& args) -> uint32_t {
+        uint32_t guest_ptr = args[0];
+        size_t size = args[1];
+        size_t nmemb = args[2];
+        uint32_t guest_fp = args[3];
+        return static_cast<uint32_t>(hook_fread(guest_ptr, size, nmemb, guest_fp, engine));
+    });
+    engine.register_host_hook("fclose", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        return static_cast<uint32_t>(hook_fclose(args[0]));
+    });
+}
 int VfsAdapter::hook_fclose(uint32_t guest_fp) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = fp_table_.find(guest_fp);

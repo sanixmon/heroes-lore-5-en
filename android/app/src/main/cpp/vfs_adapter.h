@@ -11,6 +11,7 @@
 #include "jni_bridge_core.h"
 
 namespace hl5 {
+class Arm32NativeEngine;
 
 struct VfsStream {
     int host_fd;
@@ -43,8 +44,10 @@ public:
     uint32_t hook_fdopen(uint32_t guest_fd, const char* mode);
     int hook_fseek(uint32_t guest_fp, long offset, int whence);
     size_t hook_fread(uint32_t guest_ptr, size_t size, size_t nmemb, uint32_t guest_fp, GuestAddressSpace& addr_space);
+    size_t hook_fread(uint32_t guest_ptr, size_t size, size_t nmemb, uint32_t guest_fp, Arm32NativeEngine& engine);
     int hook_fclose(uint32_t guest_fp);
 
+    void register_with_engine(Arm32NativeEngine& engine);
     void close_all();
 
 private:

@@ -66,6 +66,12 @@ void TypedHandleTable::delete_ref(uint32_t handle_id, bool is_global) {
     }
 }
 
+const HostObjectDescriptor* TypedHandleTable::find_descriptor(uint32_t handle_id) const {
+    auto it = table_.find(handle_id);
+    if (it == table_.end() || !it->second.is_valid) return nullptr;
+    return &it->second;
+}
+
 void TypedHandleTable::push_local_frame() {
     std::lock_guard<std::mutex> lock(mutex_);
     local_frames_.emplace_back();

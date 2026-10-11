@@ -41,6 +41,7 @@ public:
     uint32_t allocate(HandleType type, void* host_ptr, const std::string& class_name = "", const std::string& sig = "");
     void* resolve(uint32_t handle_id, HandleType expected_type);
     void delete_ref(uint32_t handle_id, bool is_global);
+    const HostObjectDescriptor* find_descriptor(uint32_t handle_id) const;
 
     void push_local_frame();
     void pop_local_frame();

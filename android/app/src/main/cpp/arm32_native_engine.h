@@ -36,7 +36,7 @@ public:
     bool read_memory(uint32_t guest_addr, void* out_data, size_t size);
     uint32_t allocate_heap(size_t size, size_t alignment = 8);
     uint32_t write_string(const std::string& str);
-
+    std::string read_string(uint32_t guest_addr, size_t max_len = 4096);
     // Host hooks & trampolines
     uint32_t register_host_hook(const std::string& name, HostHookFn fn);
     uint32_t get_or_create_hook(const std::string& name);

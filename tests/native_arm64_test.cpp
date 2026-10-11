@@ -253,6 +253,23 @@ int main() {
         assert(req_state == 1);
         assert(req_substate == 1);
     }
+
+    // 11. Test Host Hook vsnprintf Variadic String Formatting
+    std::cout << "\n--- Testing vsnprintf Variadic Hook Formatting ---" << std::endl;
+    uint32_t buf_addr = full_engine.allocate_heap(256, 4);
+    uint32_t fmt_addr = full_engine.write_string("/c/csv/%s.dat (id=%d)");
+    uint32_t arg_str_addr = full_engine.write_string("buildup");
+    uint32_t va_addr = full_engine.allocate_heap(32, 4);
+    uint32_t va_args[] = {arg_str_addr, 42};
+    full_engine.write_memory(va_addr, va_args, sizeof(va_args));
+
+    uint32_t vsnprintf_tramp = full_engine.get_or_create_hook("vsnprintf");
+    assert(vsnprintf_tramp != 0);
+    uint32_t formatted_len = full_engine.call_function(vsnprintf_tramp, {buf_addr, 256, fmt_addr, va_addr});
+    std::string formatted_res = full_engine.read_string(buf_addr);
+    std::cout << "[+] vsnprintf formatted output: \"" << formatted_res << "\" (len=" << formatted_len << ")" << std::endl;
+    assert(formatted_res == "/c/csv/buildup.dat (id=42)");
+    std::cout << "[PASS] vsnprintf variadic argument parsing and formatting verified!" << std::endl;
     std::cout << "\n[PASS] All Native C++ ARM32-on-AArch64 engine tests PASSED 100%!" << std::endl;
     return 0;
 }

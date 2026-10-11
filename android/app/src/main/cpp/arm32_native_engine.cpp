@@ -3,6 +3,8 @@
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
+#include <cmath>
+#include <sys/time.h>
 #ifdef __ANDROID__
 #include <android/log.h>
 #define LOG_TAG "HL5_Arm32Engine"
@@ -126,6 +128,17 @@ uint32_t Arm32NativeEngine::write_string(const std::string& str) {
     return ptr;
 }
 
+std::string Arm32NativeEngine::read_string(uint32_t guest_addr, size_t max_len) {
+    if (guest_addr == 0) return "";
+    std::string result;
+    result.reserve(64);
+    for (size_t i = 0; i < max_len; ++i) {
+        char c = 0;
+        if (!read_memory(guest_addr + i, &c, 1) || c == '\0') break;
+        result.push_back(c);
+    }
+    return result;
+}
 uint32_t Arm32NativeEngine::register_host_hook(const std::string& name, HostHookFn fn) {
     for (const auto& pair : trampoline_map_) {
         if (pair.second == name) {
@@ -192,10 +205,148 @@ void Arm32NativeEngine::setup_default_libc_hooks() {
         write_memory(ptr, zero.data(), total);
         return ptr;
     });
-
     register_host_hook("free", [](const std::vector<uint32_t>&) -> uint32_t {
         return 0;
     });
+
+    register_host_hook("strcpy", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        uint32_t dst = args[0], src = args[1];
+        std::string s = read_string(src);
+        write_memory(dst, s.c_str(), s.size() + 1);
+        return dst;
+    });
+
+    register_host_hook("strncpy", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        uint32_t dst = args[0], src = args[1], n = args[2];
+        std::string s = read_string(src, n);
+        std::vector<uint8_t> buf(n, 0);
+        memcpy(buf.data(), s.data(), std::min(s.size(), static_cast<size_t>(n)));
+        write_memory(dst, buf.data(), n);
+        return dst;
+    });
+
+    register_host_hook("strcat", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        uint32_t dst = args[0], src = args[1];
+        std::string s1 = read_string(dst);
+        std::string s2 = read_string(src);
+        std::string merged = s1 + s2;
+        write_memory(dst, merged.c_str(), merged.size() + 1);
+        return dst;
+    });
+
+    register_host_hook("strcmp", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        std::string s1 = read_string(args[0]);
+        std::string s2 = read_string(args[1]);
+        if (s1 == s2) return 0;
+        return (s1 > s2) ? 1 : static_cast<uint32_t>(-1);
+    });
+
+    register_host_hook("strncmp", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        size_t n = args[2];
+        std::string s1 = read_string(args[0], n);
+        std::string s2 = read_string(args[1], n);
+        if (s1 == s2) return 0;
+        return (s1 > s2) ? 1 : static_cast<uint32_t>(-1);
+    });
+
+    register_host_hook("connect", [](const std::vector<uint32_t>&) -> uint32_t {
+        return 0xFFFFFFFF; // Offline mock
+    });
+
+    register_host_hook("socket", [](const std::vector<uint32_t>&) -> uint32_t {
+        return 0xFFFFFFFF; // Offline mock
+    });
+
+    register_host_hook("pow", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        uint64_t x_bits = (static_cast<uint64_t>(args[1]) << 32) | args[0];
+        uint64_t y_bits = (static_cast<uint64_t>(args[3]) << 32) | args[2];
+        double x = 0, y = 0;
+        memcpy(&x, &x_bits, sizeof(double));
+        memcpy(&y, &y_bits, sizeof(double));
+        double res = std::pow(x, y);
+        uint64_t res_bits = 0;
+        memcpy(&res_bits, &res, sizeof(double));
+        // ARM32 EABI: double return in R0 (low) + R1 (high)
+        uint32_t r1_val = static_cast<uint32_t>((res_bits >> 32) & 0xFFFFFFFF);
+        uc_reg_write(uc_, UC_ARM_REG_R1, &r1_val);
+        return static_cast<uint32_t>(res_bits & 0xFFFFFFFF);
+    });
+
+    register_host_hook("ftime", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        uint32_t tp_ptr = args[0];
+        struct timeval tv;
+        gettimeofday(&tv, nullptr);
+        uint32_t sec = static_cast<uint32_t>(tv.tv_sec);
+        uint16_t millitm = static_cast<uint16_t>(tv.tv_usec / 1000);
+        int16_t timezone = 0;
+        int16_t dstflag = 0;
+        write_memory(tp_ptr, &sec, 4);
+        write_memory(tp_ptr + 4, &millitm, 2);
+        write_memory(tp_ptr + 6, &timezone, 2);
+        write_memory(tp_ptr + 8, &dstflag, 2);
+        return 0;
+    });
+
+    register_host_hook("vsnprintf", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        uint32_t buf_ptr = args[0];
+        uint32_t size = args[1];
+        uint32_t fmt_ptr = args[2];
+        uint32_t va_ptr = args[3];
+        std::string fmt = read_string(fmt_ptr);
+
+        std::string out;
+        out.reserve(256);
+        uint32_t cur_va = va_ptr;
+
+        for (size_t i = 0; i < fmt.size(); ) {
+            if (fmt[i] == '%') {
+                if (i + 1 < fmt.size() && fmt[i + 1] == '%') {
+                    out += '%';
+                    i += 2;
+                    continue;
+                }
+                size_t j = i + 1;
+                while (j < fmt.size() && (isdigit(fmt[j]) || fmt[j] == '-' || fmt[j] == '+' || fmt[j] == ' ' || fmt[j] == '#' || fmt[j] == '.' || fmt[j] == 'l' || fmt[j] == 'h')) {
+                    j++;
+                }
+                if (j < fmt.size()) {
+                    char conv = fmt[j];
+                    std::string spec = fmt.substr(i, j - i + 1);
+                    uint32_t val = 0;
+                    read_memory(cur_va, &val, 4);
+                    cur_va += 4;
+
+                    char formatted[128] = {0};
+                    if (conv == 's') {
+                        std::string s = read_string(val);
+                        out += s;
+                    } else if (conv == 'd' || conv == 'i') {
+                        snprintf(formatted, sizeof(formatted), spec.c_str(), static_cast<int32_t>(val));
+                        out += formatted;
+                    } else if (conv == 'u' || conv == 'x' || conv == 'X') {
+                        snprintf(formatted, sizeof(formatted), spec.c_str(), val);
+                        out += formatted;
+                    } else if (conv == 'c') {
+                        out += static_cast<char>(val & 0xFF);
+                    } else {
+                        out += spec;
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+            out += fmt[i++];
+        }
+
+        if (size > 0) {
+            size_t copy_len = std::min(out.size(), static_cast<size_t>(size - 1));
+            write_memory(buf_ptr, out.c_str(), copy_len);
+            char null_byte = 0;
+            write_memory(buf_ptr + copy_len, &null_byte, 1);
+        }
+        return static_cast<uint32_t>(out.size());
+    });
+
     register_host_hook("__android_log_print", [this](const std::vector<uint32_t>& args) -> uint32_t {
         if (args.size() >= 3) {
             int prio = static_cast<int>(args[0]);
@@ -216,6 +367,34 @@ void Arm32NativeEngine::setup_default_libc_hooks() {
 #endif
         }
         return 0;
+    });
+
+    register_host_hook("strdup", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        std::string s = read_string(args[0]);
+        uint32_t ptr = allocate_heap(s.size() + 1, 4);
+        write_memory(ptr, s.c_str(), s.size() + 1);
+        return ptr;
+    });
+
+    register_host_hook("__errno", [this](const std::vector<uint32_t>&) -> uint32_t {
+        // Return a stable guest address for errno (4 bytes, always 0)
+        static uint32_t errno_addr = 0;
+        if (errno_addr == 0) {
+            errno_addr = allocate_heap(4, 4);
+            uint32_t zero = 0;
+            write_memory(errno_addr, &zero, 4);
+        }
+        return errno_addr;
+    });
+
+    register_host_hook("memmove", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        uint32_t dst = args[0], src = args[1], n = args[2];
+        if (n > 0) {
+            std::vector<uint8_t> buf(n);
+            read_memory(src, buf.data(), n);
+            write_memory(dst, buf.data(), n);
+        }
+        return dst;
     });
 }
 
