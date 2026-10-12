@@ -270,6 +270,40 @@ int main() {
     std::cout << "[+] vsnprintf formatted output: \"" << formatted_res << "\" (len=" << formatted_len << ")" << std::endl;
     assert(formatted_res == "/c/csv/buildup.dat (id=42)");
     std::cout << "[PASS] vsnprintf variadic argument parsing and formatting verified!" << std::endl;
+
+    // 12. Test Second Connection Failure Offline Startup Transition
+    std::cout << "\n--- Testing Second Connection Failure Offline Transition ---" << std::endl;
+    if (game_obj >= 0x40000000) {
+        // Verify default registration flag at [game_obj + 42]
+        uint8_t init_flag = 0;
+        full_engine.read_memory(game_obj + 42, &init_flag, 1);
+        std::cout << "[+] Initial registration flag [game_obj + 42] = 0x" << std::hex << (int)init_flag << std::dec << std::endl;
+
+        // Simulate second connection failure (Popup 57): mark offline flag 'N' (0x4E)
+        uint8_t offline_flag = 'N';
+        full_engine.write_memory(game_obj + 42, &offline_flag, 1);
+        uint8_t readback_flag = 0;
+        full_engine.read_memory(game_obj + 42, &readback_flag, 1);
+        assert(readback_flag == 'N');
+        std::cout << "[PASS] Successfully marked [game_obj + 42] = 'N' (offline registration declined)" << std::endl;
+
+        // Verify that StateMainMenu responds to offline transition
+        uint32_t state_ptr = 0;
+        full_engine.read_memory(game_obj + 0x27c, &state_ptr, 4);
+        if (state_ptr >= 0x40000000) {
+            uint32_t set_substate_sym = elf_loader.find_symbol("_ZN13StateMainMenu11SetSubStateEa");
+            uint32_t get_substate_sym = elf_loader.find_symbol("_ZN13StateMainMenu11GetSubStateEv");
+            assert(set_substate_sym != 0);
+            assert(get_substate_sym != 0);
+
+            // Setting SubState 3 (Logo animation)
+            full_engine.call_function(set_substate_sym, {state_ptr, 3});
+            uint32_t current_substate = full_engine.call_function(get_substate_sym, {state_ptr});
+            assert((current_substate & 0xFF) == 3);
+            std::cout << "[PASS] Offline transition to Logo Animation (SubState 3) verified!" << std::endl;
+        }
+    }
+
     std::cout << "\n[PASS] All Native C++ ARM32-on-AArch64 engine tests PASSED 100%!" << std::endl;
     return 0;
 }

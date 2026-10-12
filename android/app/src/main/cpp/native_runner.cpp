@@ -196,6 +196,7 @@ void setup_jni_bridge() {
                 uint32_t str_ptr = g_native_engine.write_string("01000000000");
                 uint32_t h = g_handle_table.allocate(hl5::HandleType::LOCAL_REF,
                     reinterpret_cast<void*>(static_cast<uintptr_t>(str_ptr)), "01000000000");
+                return {true, h};
             }
             if (name == "freeMemory") return {true, 64 * 1024 * 1024};
             if (name == "totalMemory") return {true, 128 * 1024 * 1024};
@@ -868,6 +869,45 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnDrawFrame(
                     g_current_game_state = s_id;
                     g_current_game_substate = ss_id;
                     g_current_game_popup = p_id;
+                    // Authentic Offline Transition:
+                    // When the second connection attempt (State 1 UserLogReg, connectType 8) fails
+                    // (displaying Error 300 dialog, popup 57 / -67) or when State 2 (DrawLogo) is entered,
+                    // mark the legacy carrier registration/SMS consent flag at [game_obj + 42] = 'N' (0x4E).
+                    // In the original engine design, [game_obj + 42] stores the registration/consent status
+                    // (set by ProcPacket_Login at 0xcd924 or loaded from save data at 0x77fe4).
+                    // If left at 0, StateMainMenu::EndProcLogo (0x12382c) prompts for carrier SMS consent
+                    // and triggers netConnect(1) to the dead server, creating an infinite network loop.
+                    // Setting [game_obj + 42] = 'N' allows EndProcLogo to take the authentic offline
+                    // branch (0x1237dc) to play the EA Mobile logo animation and advance directly
+                    // to State 3.0 (Title Screen) without requiring legacy network servers.
+                    if (s_id == 1 && (p_id == -67 || p_id == 57)) {
+                        uint8_t sms_flag = 0;
+                        g_native_engine.read_memory(game_obj + 42, &sms_flag, 1);
+                        if (sms_flag == 0) {
+                            uint8_t flag = 'N';
+                            g_native_engine.write_memory(game_obj + 42, &flag, 1);
+                            LOGI("[OFFLINE_TRANSITION] Second connection attempt (UserLogReg) failed with popup %d; marked [game_obj + 42] = 'N'", p_id);
+                        }
+                    } else if (s_id == 2) {
+                        uint8_t sms_flag = 0;
+                        g_native_engine.read_memory(game_obj + 42, &sms_flag, 1);
+                        if (sms_flag == 0) {
+                            uint8_t flag = 'N';
+                            g_native_engine.write_memory(game_obj + 42, &flag, 1);
+                            LOGI("[OFFLINE_TRANSITION] State 2 (DrawLogo) reached; ensured offline SMS flag [game_obj + 42] = 'N'");
+                        }
+                        if (ss_id == 1) {
+                            // If the SMS prompt substate was already reached, safely transition
+                            // to the authentic logo animation (SubState 3) via LoadLogoSprite(1) & SetSubState(3).
+                            uint32_t load_logo_sym = g_elf_loader.find_symbol("_ZN13StateMainMenu14LoadLogoSpriteEa");
+                            uint32_t set_sub_sym = g_elf_loader.find_symbol("_ZN13StateMainMenu11SetSubStateEa");
+                            if (load_logo_sym != 0 && set_sub_sym != 0) {
+                                g_native_engine.call_function(load_logo_sym, {state_ptr, 1});
+                                g_native_engine.call_function(set_sub_sym, {state_ptr, 3});
+                                LOGI("[OFFLINE_TRANSITION] Recovered from SMS consent prompt (SubState 1) to Logo Animation (SubState 3)");
+                            }
+                        }
+                    }
                 }
             }
         } catch (const std::exception& e) {

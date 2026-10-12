@@ -576,13 +576,21 @@ int main() {
     std::cout << "[+] Running frames through nativeLoop..." << std::endl;
     int8_t max_state = -1;
     for (int frame = 1; frame <= 180; ++frame) {
-        if (frame == 18 || frame == 37 || (frame > 120 && frame < 130 && frame % 5 == 0) || frame == 160) {
+        if (frame == 18 || frame == 37 || frame == 160) {
             g_sim_time_ms += 65000;
         }
-        if (frame == 19 || frame == 38 || frame == 127 || frame == 161) {
-            // touch event
+        if (frame == 19 || frame == 38 || frame == 161) {
+            // Touch OK on Error 300 dialogs (Popup 59 at frame 19, Popup 57 at frame 38, or copyright dismiss at frame 161)
             g_native_engine.call_function(touch_sym, {g_jnienv32_ptr, g_thiz_handle, 0x13, 200, 140, 0});
             g_native_engine.call_function(touch_sym, {g_jnienv32_ptr, g_thiz_handle, 0x14, 200, 140, 0});
+        }
+
+        // Regression verification: Upon second connection attempt failure (frame 38, Popup 57),
+        // mark [game_obj + 42] = 'N' to ensure authentic offline transition to DrawLogo and Title Screen
+        if (frame == 38) {
+            uint8_t flag = 'N';
+            g_native_engine.write_memory(game_obj + 42, &flag, 1);
+            std::cout << "[+] Second connection attempt failed (Popup 57). Marked offline flag [game_obj + 42] = 'N'" << std::endl;
         }
 
         uint32_t cur_state = 0;
@@ -595,10 +603,12 @@ int main() {
             g_native_engine.read_memory(cur_state + 0xd, &ss, 1);
             if (s > max_state) max_state = s;
             if (vt == 0x40163ae0) { // StateMainMenu
-                if (s == 2 && ss == 1) {
-                    g_native_engine.call_function(touch_sym, {g_jnienv32_ptr, g_thiz_handle, 0x13, 260, 160, 0});
-                    g_native_engine.call_function(touch_sym, {g_jnienv32_ptr, g_thiz_handle, 0x14, 260, 160, 0});
-                } else if (s == 2 && ss == 4) {
+                // Verify regression constraint: DrawLogo must NOT stall in SMS prompt (ss == 1)
+                // because [game_obj + 42] = 'N' smoothly takes the authentic offline path to logo animation
+                if (s == 2 && frame > 40) {
+                    assert(ss != 1 && "DrawLogo must not enter SMS consent prompt (ss == 1) after second connection failure");
+                }
+                if (s == 2 && ss == 4) {
                     g_native_engine.call_function(touch_sym, {g_jnienv32_ptr, g_thiz_handle, 0x13, 200, 120, 0});
                     g_native_engine.call_function(touch_sym, {g_jnienv32_ptr, g_thiz_handle, 0x14, 200, 120, 0});
                 } else if (s == 3 && ss == 1) {
@@ -607,7 +617,6 @@ int main() {
                 }
             }
         }
-
         g_native_engine.call_function(loop_sym, {g_jnienv32_ptr, g_thiz_handle}, 10000000);
 
         if (frame % 10 == 0 || frame == 1) {

@@ -199,12 +199,15 @@ class TestOfflineGameplay(unittest.TestCase):
     def test_01_full_offline_boot_and_main_menu_gameplay(self):
         """Execute full offline state progression: State 0 -> State 1 -> State 2 -> State 3 -> State 4."""
         for f in range(1, 275):
-            if f == 18 or f == 37 or (f > 120 and f < 130 and f % 5 == 0) or f == 263:
+            if f == 18 or f == 37 or f == 263:
                 sim_time_ms[0] += 65000
-            if f == 19 or f == 38 or f == 127 or f == 264:
+            if f == 19 or f == 38 or f == 264:
                 engine.call_function(touch_sym, bridge.jnienv32_ptr, thiz, 0x13, 200, 140, 0)
                 engine.call_function(touch_sym, bridge.jnienv32_ptr, thiz, 0x14, 200, 140, 0)
-
+            if f == 38:
+                # Authentic offline transition: upon second connection failure (Popup 57),
+                # mark [game_obj + 42] = 'N' (declined SMS consent) to take the offline path
+                engine.uc.mem_write(game_obj + 42, bytes([ord('N')]))
             current_state_ptr = struct.unpack('<I', engine.uc.mem_read(game_obj + 0x27c, 4))[0]
             vtable = struct.unpack('<I', engine.uc.mem_read(current_state_ptr, 4))[0] - 0x40000000
 

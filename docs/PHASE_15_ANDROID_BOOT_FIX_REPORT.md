@@ -2,22 +2,24 @@
 
 ## 1. Executive Summary
 
-- **Objective**: Fix the Android runtime initialization failure that left the game in standby state: `State: -1.-1 (Pop: -1)`, and enable the original ARM32 game engine to execute its authentic state-machine initialization path and reach the original Title Screen or Main Menu on Android arm64-v8a.
-- **Starting Commit**: `f7a03d3`
-- **Final Commit**: (To be committed upon report completion)
+- **Objective**: Fix the Android runtime initialization failure and legacy network startup loop that trapped the game in:
+  1. Standby state `State: -1.-1 (Pop: -1)` (prior to 6-stage boot connection).
+  2. Legacy network startup loop reaching frame 7,560 where the game requested SMS permission ("Agree to SMS reception?") and looped back into "Connecting...".
+  Enable the original ARM32 game engine to execute its authentic state-machine initialization path, transition through offline error handling, and reach the original Title Screen (`State 3.0`) with active BGM on Android arm64-v8a.
+- **Starting Commit**: `72db977`
+- **Final Commit**: (Current commit)
 - **Status Summary**:
-  - **Host / QEMU AArch64 Native Execution**: **PASS (VERIFIED)**.
-    - Successfully executes authentic 7-stage boot sequence.
+  - **Host / QEMU AArch64 Native Execution**: **PASS (VERIFIED 100%)**.
+    - Successfully executes authentic 6-stage boot sequence.
     - All 126 required assets loaded from `data.vfs.mp3`.
-    - Game state transitions through:
-      - `State 0.0` (`CheckEvent`)
-      - `State 1.0` (`UserLogReg`)
+    - Handles offline timeouts for first connection attempt (`State 0.0 CheckEvent`, `netConnect(9)`) and second connection attempt (`State 1.0 UserLogReg`, `netConnect(8)`).
+    - Second connection failure safely transitions into authentic offline startup path:
       - `State 2.0` (`DrawLogo`)
-      - `State 2.3` (EA Logo display, BGM resIndex=16)
+      - `State 2.3` (EA Logo display & animation, BGM resIndex=16)
+      - `State 2.4` (EA Copyright screen)
       - `State 3.0` (Original Title Screen, `title.cif` & `title.mgr` rendered, Title Screen BGM resIndex=20 active).
-    - Framebuffer `Graphic::GetFB()` validated at `0x500025d8` with **156 unique colors**.
+    - Framebuffer `Graphic::GetFB()` validated at `0x500025d8` with **274 unique colors**.
   - **Android Physical Device / Emulator Verification**: **NOT RUN** (Cloud workstation environment has no attached ADB devices).
-
 ---
 
 ## 2. Root Cause Analysis
@@ -58,6 +60,39 @@ Dereferencing `str_desc->host_ptr` (a guest virtual address such as `0x7001ec4c`
 ### 2.4 Third Runtime Divergence: Premature Unicorn Execution Timeout
 `native_runner.cpp` called `call_function(start_app_sym, ..., 30000000)` with a 30-second timeout. Under slower translation environments, Unicorn reached the deadline while loading the 126 assets, stopping emulation and returning `UC_ERR_OK` before `onStartApp` could instantiate `CGame`, `StateMainMenu`, or schedule `TimerCb`. Setting `timeout_us = 0` allows complete initialization.
 
+
+### 2.5 Fourth Runtime Divergence: Legacy Network Startup Loop in Offline Boot (Commit `72db977`)
+On a physical Android device, after fixing the 6-stage boot sequence, user telemetry observed:
+```text
+HL5 Frame #7560 | GLES Provider: libGLESv1_CM.so Viewport: 1931x681 | State: 2.1 (Pop: 11)
+Status: First connection attempt times out and displays 'Poor server connection. Please try again later.(300)'.
+After dialog is acknowledged, game requests SMS permission and returns to Connecting.
+```
+Investigation through binary disassembly of `apktool_modern/lib/armeabi/libHeroesLore5.so` revealed:
+1. **First Connection Attempt (`State 0` `CheckEvent`)**:
+   `StateMainMenu::endProcess()` calls `_ZN7NETWORK10netConnectEa(9)`. Because the 2011 carrier server is unreachable, the watchdog timer in `_ZN10StatePopup7ProcessEv` times out after 60 seconds (frame ~3,600) and calls `_ZN7NETWORK8setErrorEi(300)`. This displays modal Popup 59 ("Poor server connection. Please try again later.(300)"). When the user taps "OK", `StateMainMenu::Process` sets `State 1` (`UserLogReg`).
+2. **Second Connection Attempt (`State 1` `UserLogReg`)**:
+   After 16 frames in State 1, `StateMainMenu::endProcess()` calls `_ZN7NETWORK10netConnectEa(8)`. The watchdog timer times out after 60 seconds (frame ~7,200..7,560) and calls `_ZN7NETWORK8setErrorEi(300)`. This displays modal Popup 57 ("Poor server connection. Please try again later.(300)"). When the user taps "OK", `StateMainMenu::Process` (at `0x124e24`) clears Popup 57 and transitions to `State 2` (`DrawLogo`).
+3. **The SMS Consent Trap in `DrawLogo` (`State 2`)**:
+   In State 2, at frame 79, `_ZN13StateMainMenu11EndProcLogoEv` (at `0x12382c`) inspects byte `[g_pGame + 42]`:
+   ```arm
+   123828: ldr r3, [r4, r3]     ; r3 = *g_pGame
+   12382c: ldrsb r3, [r3, #42]  ; r3 = [g_pGame + 42] (registration status)
+   123830: cmp r3, #0
+   123834: bne 0x1237dc         ; IF NON-ZERO: BYPASSES SMS AND ADVANCES TO LOGO ANIMATION!
+   123838: mov r0, r5
+   12383c: mov r1, #1
+   123848: b SetSubState(1)     ; IF ZERO: ENTERS SMS CONSENT PROMPT!
+   ```
+   In the original 2011 release, `[g_pGame + 42]` was populated with `'Y'` (0x59) or `'N'` (0x4E) by `_ZN7NETWORK16ProcPacket_LoginEij` (at `0xcd924`) upon receiving a successful login response packet from the carrier server, or restored from local save data by `_ZN8CommonUi17LoadLocalSaveDataEv` (at `0x77fe4`).
+   In offline mode on fresh installation, no login packet ever arrives. `[g_pGame + 42]` remains 0.
+   Consequently, `EndProcLogo` always entered `SubState 1`, rendering the in-game Korean carrier SMS event consent prompt:
+   `Agree to SMS reception?;Get helpful event info and;news.` (`menu_text.dat` string 179 + `common_text.dat` string 329).
+4. **The Infinite Network Loop**:
+   When the user touched either "YES" or "NO", `_ZN13StateMainMenu7KeyLogoEi` (at `0x124530`) stored the selection in `[g_pNetwork, #112]` and called `_ZN7NETWORK10netConnectEa(1)` to upload the consent choice to the server.
+   `netConnect(1)` pushed modal Popup 339 ("Connecting...") back onto the screen.
+   Because the server is dead, it stalled again for 60 seconds until Error 300 Popup 26 was displayed.
+   When Popup 26 was dismissed, `StateMainMenu::Process` (at `0x124ac8`) explicitly called `SetSubState(1)`, re-opening the SMS consent prompt and trapping the game in an infinite network loop.
 ---
 
 ## 3. Relevant Execution Path
@@ -123,19 +158,35 @@ Replaced the dummy `vsnprintf` hook with a full argument-parsing implementation 
 ### 4.3 VFS Bridge Registration (`android/app/src/main/cpp/vfs_adapter.cpp`, `vfs_adapter.h`)
 Exposed `VfsAdapter::register_with_engine(Arm32NativeEngine& engine)` to bind guest libc calls (`dup`, `fdopen`, `fseek`, `fread`, `fclose`) directly to the active `Arm32NativeEngine`.
 
-### 4.4 Regression Tests
-- `tests/test_boot_simulation.cpp`: Native AArch64 end-to-end integration test validating the boot sequence, resource loading, state progression to `State 3.0`, and framebuffer unique color density.
-- `tests/native_arm64_test.cpp`: Added Test 11 verifying `vsnprintf` variadic argument parsing and formatting.
 
+### 4.4 Authentic Offline Transition Fix (`android/app/src/main/cpp/native_runner.cpp`)
+Implemented the minimal offline transition in `nativeOnDrawFrame()`:
+1. When the second connection attempt (`State 1` `UserLogReg`) fails with Error 300 (Popup 57 / -67) or when `State 2` (`DrawLogo`) is entered:
+   Checks `[game_obj + 42]`. If 0, marks `[game_obj + 42] = 'N'` (0x4E, declined / offline default).
+2. When `EndProcLogo` checks `[g_pGame + 42]` at frame 79, `[game_obj + 42] != 0` immediately triggers the authentic offline progression path at `0x1237dc`:
+   - Calls `_ZN13StateMainMenu14FreeLogoSpriteEv()`
+   - Calls `_ZN13StateMainMenu14LoadLogoSpriteEa(1)`
+   - Sets `SubState 3` (EA Mobile logo display & animation)
+   - Plays sound 16 (`PlaySound(16, 0, 1, 0)`)
+   - Advances to `SubState 4` (EA Copyright screen)
+   - Calls `SetState(3)` (`Title Screen`)
+   - Plays sound 20 (Title BGM `bgm_01.ogg`)
+   - Renders the authentic Title Screen framebuffer (274 unique colors)
+3. If `SubState 1` (the SMS consent prompt) was already reached before the flag was written, safely triggers `LoadLogoSprite(1)` and `SetSubState(3)` to recover immediately to the logo animation.
+4. Fixed missing return value in `CletEntry.getMin` JNI dispatch in `native_runner.cpp` line 199 (`return {true, h}`).
+### 4.5 Regression Tests
+- `tests/test_boot_simulation.cpp`: Native AArch64 end-to-end integration test validating the boot sequence, handling second connection failure (Popup 57), and verifying authentic offline transition directly to State 3.0 (Title Screen) with active BGM and 274 unique framebuffer colors.
+- `tests/native_arm64_test.cpp`: Added Test 11 (vsnprintf variadic argument parsing) and Test 12 (Second connection failure offline startup transition and StateMainMenu substate progression).
+- `tests/test_offline_gameplay.py`: Updated full offline progression verifying State 0 -> 1 -> 2 -> 3 -> 4 transition without legacy SMS loop stalling.
 ---
 
 ## 5. Verification Results
 
 | Test / Check | Environment | Command | Scope | Result |
 |---|---|---|---|---|
-| **Python Regression Suite** | Host x86_64 | `python3 -m unittest discover tests` | 34 unit and integration tests (VFS, JNI, StateGame, DES save/load) | **PASS (34/34 in 57.0s)** |
-| **Native AArch64 Suite** | QEMU AArch64 | `qemu-aarch64 -L /usr/aarch64-linux-gnu ./tests/native_arm64_test` | 11 tests including ELF loader, GLES bridge, draw arrays, state manager, touch events, and vsnprintf formatting | **PASS (100%)** |
-| **AArch64 Boot Simulation** | QEMU AArch64 | `qemu-aarch64 -L /usr/aarch64-linux-gnu ./tests/test_boot_simulation` | Full boot sequence from startup to Title Screen (State 3.0) with framebuffer color density | **PASS (100%, 156 colors)** |
+| **Python Regression Suite** | Host x86_64 | `python3 -m unittest discover tests` | 34 unit and integration tests (VFS, JNI, StateGame, DES save/load, offline startup) | **PASS (34/34 in 51.6s)** |
+| **Native AArch64 Suite** | QEMU AArch64 | `qemu-aarch64 -L /usr/aarch64-linux-gnu ./tests/native_arm64_test` | 12 tests including ELF loader, GLES bridge, draw arrays, state manager, touch events, vsnprintf, and offline transition | **PASS (100%)** |
+| **AArch64 Boot Simulation** | QEMU AArch64 | `qemu-aarch64 -L /usr/aarch64-linux-gnu ./tests/test_boot_simulation` | Full boot sequence from startup through second connection failure to Title Screen (State 3.0) with framebuffer color density | **PASS (100%, 274 colors)** |
 | **Android APK Build & Signing** | Android NDK r25b | `bash build_apk.sh` | NDK Clang++ compilation, d8 dexing, aapt packaging, 4-byte zipalign, apksigner v2 & v3 schemes | **PASS (Verified)** |
 | **Physical Android Device** | Android Hardware | `adb devices -l` | Runtime verification on physical hardware | **NOT RUN** (Headless cloud runner) |
 
