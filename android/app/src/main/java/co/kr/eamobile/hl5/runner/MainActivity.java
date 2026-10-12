@@ -39,6 +39,7 @@ public class MainActivity extends Activity implements GLSurfaceView.Renderer {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        hideSystemUI();
         Log.i(TAG, "MainActivity.onCreate() started");
 
         Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
@@ -128,10 +129,35 @@ public class MainActivity extends Activity implements GLSurfaceView.Renderer {
         overlayTextView.setTextSize(12.0f);
         overlayTextView.setPadding(20, 20, 20, 20);
         overlayTextView.setText("HL5 ARM64 Runner initializing...");
+        overlayTextView.setOnClickListener(new android.view.View.OnClickListener() {
+            @Override
+            public void onClick(android.view.View v) {
+                overlayTextView.setVisibility(android.view.View.GONE);
+            }
+        });
 
         layout.addView(glSurfaceView);
         layout.addView(overlayTextView);
         setContentView(layout);
+        hideSystemUI();
+    }
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            hideSystemUI();
+        }
+    }
+
+    private void hideSystemUI() {
+        android.view.View decorView = getWindow().getDecorView();
+        decorView.setSystemUiVisibility(
+            android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+            | android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+            | android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+            | android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+            | android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
+            | android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
     }
 
     @Override
@@ -150,6 +176,14 @@ public class MainActivity extends Activity implements GLSurfaceView.Renderer {
     public void onDrawFrame(GL10 gl) {
         frameCount++;
         final String frameStatus = nativeOnDrawFrame();
+        if (frameCount == 180) {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    overlayTextView.setVisibility(android.view.View.GONE);
+                }
+            });
+        }
         if (frameCount <= 5 || frameCount % 60 == 0) {
             runOnUiThread(new Runnable() {
                 @Override

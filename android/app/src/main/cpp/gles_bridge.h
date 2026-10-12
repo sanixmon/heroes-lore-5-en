@@ -72,6 +72,12 @@ public:
     const GlesDiagnostics& diagnostics() const { return diag_; }
     void reset_diagnostics();
     void dump_status() const;
+    void set_surface_size(int32_t width, int32_t height) {
+        surface_w_ = width;
+        surface_h_ = height;
+    }
+    int32_t surface_width() const { return surface_w_; }
+    int32_t surface_height() const { return surface_h_; }
 
     static inline float unpack_float(uint32_t u) {
         float f;
@@ -85,6 +91,8 @@ private:
     const char* provider_name_;
     Arm32NativeEngine* engine_;
     GlesDiagnostics diag_;
+    int32_t surface_w_ = 0;
+    int32_t surface_h_ = 0;
 
     // Host GLES 1.1 Function Pointers
     PFN_glBindTexture        p_glBindTexture;

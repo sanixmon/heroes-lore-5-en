@@ -814,13 +814,14 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnSurfaceChanged(
     // Runs on GLThread!
     g_surface_w = width;
     g_surface_h = height;
+    g_gles_bridge.set_surface_size(width, height);
 
     if (g_engine_ready && g_km_instance != 0) {
-        uint32_t w = static_cast<uint32_t>(width);
-        uint32_t h = static_cast<uint32_t>(height);
+        // Keep guest coordinate space mapped to 800x480 quad
+        uint32_t w = 800;
+        uint32_t h = 480;
         g_native_engine.write_memory(g_km_instance + 0x624, &w, 4);
         g_native_engine.write_memory(g_km_instance + 0x628, &h, 4);
-
         uint32_t init2d_sym = g_elf_loader.find_symbol("_ZN18MIDASKernelManager12init2DScreenEv");
         if (init2d_sym != 0) {
             g_native_engine.call_function(init2d_sym, {g_km_instance});

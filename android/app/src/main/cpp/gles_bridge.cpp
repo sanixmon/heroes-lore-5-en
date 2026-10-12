@@ -169,11 +169,21 @@ void GlesBridge::register_with_engine(Arm32NativeEngine& engine) {
 
     engine.register_host_hook("glViewport", [this](const std::vector<uint32_t>& args) -> uint32_t {
         diag_.total_calls++;
-        diag_.viewport_w = static_cast<int32_t>(args[2]);
-        diag_.viewport_h = static_cast<int32_t>(args[3]);
+        int32_t vx = static_cast<int32_t>(args[0]);
+        int32_t vy = static_cast<int32_t>(args[1]);
+        int32_t vw = static_cast<int32_t>(args[2]);
+        int32_t vh = static_cast<int32_t>(args[3]);
+        diag_.viewport_w = (surface_w_ > 0) ? surface_w_ : vw;
+        diag_.viewport_h = (surface_h_ > 0) ? surface_h_ : vh;
+
+        // When physical surface size is configured, enforce true fullscreen viewport across the device:
+        int32_t target_x = (surface_w_ > 0) ? 0 : vx;
+        int32_t target_y = (surface_h_ > 0) ? 0 : vy;
+        int32_t target_w = (surface_w_ > 0) ? surface_w_ : vw;
+        int32_t target_h = (surface_h_ > 0) ? surface_h_ : vh;
+
         if (p_glViewport) {
-            p_glViewport(static_cast<int32_t>(args[0]), static_cast<int32_t>(args[1]),
-                         diag_.viewport_w, diag_.viewport_h);
+            p_glViewport(target_x, target_y, target_w, target_h);
         }
         return 0;
     });
@@ -242,12 +252,21 @@ void GlesBridge::register_with_engine(Arm32NativeEngine& engine) {
         float zNear  = (args.size() > 4) ? unpack_float(args[4]) : -1.0f;
         float zFar   = (args.size() > 5) ? unpack_float(args[5]) :  1.0f;
 
-        diag_.last_ortho_left = left;
-        diag_.last_ortho_right = right;
-        diag_.last_ortho_bottom = bottom;
-        diag_.last_ortho_top = top;
+        // Fullscreen Quad Projection:
+        // Texture2D's quad vertices are permanently set to 800.0f x 480.0f (or 400.0f x 240.0f).
+        // If the orthographic projection is set to physical surface dimensions (e.g. 1931 x 681),
+        // the quad renders as a small rectangle trapped in the bottom-left corner.
+        // Lock orthographic projection bounds to match the quad's coordinate space (0..800 x 0..480)
+        // so that the GPU hardware scales the quad to fill 100% of the active fullscreen viewport.
+        float target_right = (right > 400.0f) ? 800.0f : 400.0f;
+        float target_top   = (top > 240.0f) ? 480.0f : 240.0f;
 
-        if (p_glOrthof) p_glOrthof(left, right, bottom, top, zNear, zFar);
+        diag_.last_ortho_left = 0.0f;
+        diag_.last_ortho_right = target_right;
+        diag_.last_ortho_bottom = 0.0f;
+        diag_.last_ortho_top = target_top;
+
+        if (p_glOrthof) p_glOrthof(0.0f, target_right, 0.0f, target_top, zNear, zFar);
         return 0;
     });
 
