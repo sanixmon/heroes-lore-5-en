@@ -58,6 +58,32 @@ std::string            g_last_frame_status = "Awaiting first frame";
 std::unordered_map<std::string, int> g_name_to_id;
 std::unordered_map<int, std::string> g_id_to_name;
 
+// Host JNI Audio Bridge references (for BGM MediaPlayer & SFX SoundPool in MainActivity.java)
+JavaVM*                g_host_jvm = nullptr;
+jobject                g_host_activity_ref = nullptr;
+jmethodID              g_mid_put_music = nullptr;
+jmethodID              g_mid_play_music = nullptr;
+jmethodID              g_mid_stop_music = nullptr;
+jmethodID              g_mid_pause_music = nullptr;
+jmethodID              g_mid_resume_music = nullptr;
+jmethodID              g_mid_free_music = nullptr;
+jmethodID              g_mid_set_music_vol = nullptr;
+jmethodID              g_mid_put_sound = nullptr;
+jmethodID              g_mid_play_sound = nullptr;
+jmethodID              g_mid_stop_sound = nullptr;
+jmethodID              g_mid_free_sound = nullptr;
+jmethodID              g_mid_set_sound_vol = nullptr;
+int32_t                g_music_volume = 80;
+int32_t                g_sound_volume = 80;
+
+JNIEnv* get_host_env() {
+    if (!g_host_jvm) return nullptr;
+    JNIEnv* env = nullptr;
+    if (g_host_jvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) == JNI_OK) {
+        return env;
+    }
+    return nullptr;
+}
 void native_signal_handler(int sig, siginfo_t* info, void* /*context*/) {
     LOGE("FATAL NATIVE SIGNAL CAUGHT: signal=%d, si_code=%d, fault_addr=%p",
          sig, info ? info->si_code : 0, info ? info->si_addr : nullptr);
@@ -201,6 +227,138 @@ void setup_jni_bridge() {
             if (name == "freeMemory") return {true, 64 * 1024 * 1024};
             if (name == "totalMemory") return {true, 128 * 1024 * 1024};
             if (name == "isNetworkAvailable") return {true, 0};
+            // Audio Bridge: Music (MediaPlayer) & Sound Effects (SoundPool)
+            if (name == "putMusicClip" && extra_args.size() >= 6) {
+                int64_t clip_id = (static_cast<int64_t>(extra_args[1]) << 32) | extra_args[0];
+                int64_t offset  = (static_cast<int64_t>(extra_args[3]) << 32) | extra_args[2];
+                int64_t length  = (static_cast<int64_t>(extra_args[5]) << 32) | extra_args[4];
+                JNIEnv* env = get_host_env();
+                if (env && g_host_activity_ref && g_mid_put_music) {
+                    env->CallIntMethod(g_host_activity_ref, g_mid_put_music,
+                                       static_cast<jlong>(clip_id), static_cast<jlong>(offset), static_cast<jlong>(length));
+                }
+                return {true, 0};
+            }
+            if (name == "clipPlayMusic" && extra_args.size() >= 3) {
+                int64_t clip_id = (static_cast<int64_t>(extra_args[1]) << 32) | extra_args[0];
+                bool loop = (extra_args[2] & 0xFF) != 0;
+                JNIEnv* env = get_host_env();
+                if (env && g_host_activity_ref && g_mid_play_music) {
+                    env->CallIntMethod(g_host_activity_ref, g_mid_play_music,
+                                       static_cast<jlong>(clip_id), static_cast<jboolean>(loop ? JNI_TRUE : JNI_FALSE));
+                }
+                return {true, 0};
+            }
+            if (name == "clipStopMusic" && extra_args.size() >= 2) {
+                int64_t clip_id = (static_cast<int64_t>(extra_args[1]) << 32) | extra_args[0];
+                JNIEnv* env = get_host_env();
+                if (env && g_host_activity_ref && g_mid_stop_music) {
+                    env->CallIntMethod(g_host_activity_ref, g_mid_stop_music, static_cast<jlong>(clip_id));
+                }
+                return {true, 0};
+            }
+            if (name == "clipPauseMusic" && extra_args.size() >= 2) {
+                int64_t clip_id = (static_cast<int64_t>(extra_args[1]) << 32) | extra_args[0];
+                JNIEnv* env = get_host_env();
+                if (env && g_host_activity_ref && g_mid_pause_music) {
+                    env->CallIntMethod(g_host_activity_ref, g_mid_pause_music, static_cast<jlong>(clip_id));
+                }
+                return {true, 0};
+            }
+            if (name == "clipResumeMusic" && extra_args.size() >= 2) {
+                int64_t clip_id = (static_cast<int64_t>(extra_args[1]) << 32) | extra_args[0];
+                JNIEnv* env = get_host_env();
+                if (env && g_host_activity_ref && g_mid_resume_music) {
+                    env->CallIntMethod(g_host_activity_ref, g_mid_resume_music, static_cast<jlong>(clip_id));
+                }
+                return {true, 0};
+            }
+            if (name == "clipFreeMusic" && extra_args.size() >= 2) {
+                int64_t clip_id = (static_cast<int64_t>(extra_args[1]) << 32) | extra_args[0];
+                JNIEnv* env = get_host_env();
+                if (env && g_host_activity_ref && g_mid_free_music) {
+                    env->CallIntMethod(g_host_activity_ref, g_mid_free_music, static_cast<jlong>(clip_id));
+                }
+                return {true, 0};
+            }
+            if (name == "setMusicVolume" && extra_args.size() >= 1) {
+                g_music_volume = static_cast<int32_t>(extra_args[0]);
+                JNIEnv* env = get_host_env();
+                if (env && g_host_activity_ref && g_mid_set_music_vol) {
+                    env->CallVoidMethod(g_host_activity_ref, g_mid_set_music_vol, static_cast<jint>(g_music_volume));
+                }
+                return {true, 0};
+            }
+            if (name == "getMusicVolume") {
+                return {true, static_cast<uint32_t>(g_music_volume)};
+            }
+            if (name == "putSoundClip" && extra_args.size() >= 6) {
+                int64_t clip_id = (static_cast<int64_t>(extra_args[1]) << 32) | extra_args[0];
+                int64_t offset  = (static_cast<int64_t>(extra_args[3]) << 32) | extra_args[2];
+                int64_t length  = (static_cast<int64_t>(extra_args[5]) << 32) | extra_args[4];
+                int32_t type    = (extra_args.size() >= 7) ? static_cast<int32_t>(extra_args[6]) : 0;
+                JNIEnv* env = get_host_env();
+                if (env && g_host_activity_ref && g_mid_put_sound) {
+                    env->CallIntMethod(g_host_activity_ref, g_mid_put_sound,
+                                       static_cast<jlong>(clip_id), static_cast<jlong>(offset),
+                                       static_cast<jlong>(length), static_cast<jint>(type));
+                }
+                return {true, 0};
+            }
+            if (name == "clipPlaySound" && extra_args.size() >= 3) {
+                int64_t clip_id = (static_cast<int64_t>(extra_args[1]) << 32) | extra_args[0];
+                bool loop = (extra_args[2] & 0xFF) != 0;
+                JNIEnv* env = get_host_env();
+                if (env && g_host_activity_ref && g_mid_play_sound) {
+                    env->CallIntMethod(g_host_activity_ref, g_mid_play_sound,
+                                       static_cast<jlong>(clip_id), static_cast<jboolean>(loop ? JNI_TRUE : JNI_FALSE));
+                }
+                return {true, 0};
+            }
+            if ((name == "clipStopSound" || name == "clipPauseSound") && extra_args.size() >= 2) {
+                int64_t clip_id = (static_cast<int64_t>(extra_args[1]) << 32) | extra_args[0];
+                JNIEnv* env = get_host_env();
+                if (env && g_host_activity_ref && g_mid_stop_sound) {
+                    env->CallIntMethod(g_host_activity_ref, g_mid_stop_sound, static_cast<jlong>(clip_id));
+                }
+                return {true, 0};
+            }
+            if (name == "clipResumeSound" && extra_args.size() >= 2) {
+                return {true, 0};
+            }
+            if (name == "clipFreeSound" && extra_args.size() >= 2) {
+                int64_t clip_id = (static_cast<int64_t>(extra_args[1]) << 32) | extra_args[0];
+                JNIEnv* env = get_host_env();
+                if (env && g_host_activity_ref && g_mid_free_sound) {
+                    env->CallIntMethod(g_host_activity_ref, g_mid_free_sound, static_cast<jlong>(clip_id));
+                }
+                return {true, 0};
+            }
+            if (name == "setSoundVolume" && extra_args.size() >= 1) {
+                g_sound_volume = static_cast<int32_t>(extra_args[0]);
+                JNIEnv* env = get_host_env();
+                if (env && g_host_activity_ref && g_mid_set_sound_vol) {
+                    env->CallVoidMethod(g_host_activity_ref, g_mid_set_sound_vol, static_cast<jint>(g_sound_volume));
+                }
+                return {true, 0};
+            }
+            if (name == "getSoundVolume") {
+                return {true, static_cast<uint32_t>(g_sound_volume)};
+            }
+            if (name == "setVolume" && extra_args.size() >= 1) {
+                int32_t vol = static_cast<int32_t>(extra_args[0]);
+                g_music_volume = vol;
+                g_sound_volume = vol;
+                JNIEnv* env = get_host_env();
+                if (env && g_host_activity_ref) {
+                    if (g_mid_set_music_vol) env->CallVoidMethod(g_host_activity_ref, g_mid_set_music_vol, static_cast<jint>(vol));
+                    if (g_mid_set_sound_vol) env->CallVoidMethod(g_host_activity_ref, g_mid_set_sound_vol, static_cast<jint>(vol));
+                }
+                return {true, 0};
+            }
+            if (name == "getVolume") {
+                return {true, static_cast<uint32_t>(g_music_volume)};
+            }
         }
         return {false, 0};
     };
@@ -562,7 +720,7 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeRunDiagnosticTests(
 JNIEXPORT void JNICALL
 Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnSurfaceCreated(
     JNIEnv* env,
-    jobject /*thiz*/,
+    jobject thiz,
     jstring internalPathStr,
     jstring externalPathStr) {
     // Runs on GLThread with active EGLContext!
@@ -571,6 +729,27 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnSurfaceCreated(
     g_frame_counter = 0;
     g_engine_ready = false;
 
+    // Cache host JavaVM and MainActivity audio callback methods
+    env->GetJavaVM(&g_host_jvm);
+    if (g_host_activity_ref) {
+        env->DeleteGlobalRef(g_host_activity_ref);
+    }
+    g_host_activity_ref = env->NewGlobalRef(thiz);
+    jclass act_cls = env->GetObjectClass(thiz);
+    if (act_cls) {
+        g_mid_put_music     = env->GetMethodID(act_cls, "onPutMusicClip",     "(JJJ)I");
+        g_mid_play_music    = env->GetMethodID(act_cls, "onPlayMusicClip",    "(JZ)I");
+        g_mid_stop_music    = env->GetMethodID(act_cls, "onStopMusicClip",    "(J)I");
+        g_mid_pause_music   = env->GetMethodID(act_cls, "onPauseMusicClip",   "(J)I");
+        g_mid_resume_music  = env->GetMethodID(act_cls, "onResumeMusicClip",  "(J)I");
+        g_mid_free_music    = env->GetMethodID(act_cls, "onFreeMusicClip",    "(J)I");
+        g_mid_set_music_vol = env->GetMethodID(act_cls, "onSetMusicVolume",   "(I)V");
+        g_mid_put_sound     = env->GetMethodID(act_cls, "onPutSoundClip",     "(JJJI)I");
+        g_mid_play_sound    = env->GetMethodID(act_cls, "onPlaySoundClip",    "(JZ)I");
+        g_mid_stop_sound    = env->GetMethodID(act_cls, "onStopSoundClip",    "(J)I");
+        g_mid_free_sound    = env->GetMethodID(act_cls, "onFreeSoundClip",    "(J)I");
+        g_mid_set_sound_vol = env->GetMethodID(act_cls, "onSetSoundVolume",   "(I)V");
+    }
     // 1. Initialize GLES Bridge with host driver
     LOGI("[MILESTONE 2/9] Initializing EGL/GLES 1.1 Bridge");
     bool gles_ok = g_gles_bridge.initialize();
@@ -839,6 +1018,8 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnDrawFrame(
         LOGI("[MILESTONE 6/9] First game loop frame triggered on GLThread");
     }
     if (g_engine_ready && g_km_instance != 0) {
+    g_gles_bridge.clear_screen();
+    g_gles_bridge.apply_active_viewport();
         std::lock_guard<std::mutex> lock(g_engine_mutex);
         // Execute recurring frame lifecycle:
         // 1. Process game logic and timers via nativeLoop if available
@@ -992,13 +1173,14 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnTouchEvent(
     g_last_touch_type = event_type;
 
     // Coordinate space mapping:
-    // Target virtual resolution: 400x240 (or 800x480 screen with 2.0x magnification)
-    // Clamp and transform from surface coordinates (g_surface_w x g_surface_h) to 400x240:
+    // Map from active viewport (5:3 centered pillarbox or fullscreen stretch) to 400x240 game coordinates:
+    int32_t vp_x = 0, vp_y = 0, vp_w = 0, vp_h = 0;
+    g_gles_bridge.get_active_viewport(vp_x, vp_y, vp_w, vp_h);
     int32_t game_x = 0;
     int32_t game_y = 0;
-    if (g_surface_w > 0 && g_surface_h > 0) {
-        game_x = (raw_x_int * 400) / g_surface_w;
-        game_y = (raw_y_int * 240) / g_surface_h;
+    if (vp_w > 0 && vp_h > 0) {
+        game_x = ((raw_x_int - vp_x) * 400) / vp_w;
+        game_y = ((raw_y_int - vp_y) * 240) / vp_h;
     }
     if (game_x < 0) game_x = 0;
     if (game_x > 399) game_x = 399;
@@ -1006,7 +1188,6 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnTouchEvent(
     if (game_y > 239) game_y = 239;
     g_last_touch_game_x = game_x;
     g_last_touch_game_y = game_y;
-
     if (!g_engine_ready || g_km_instance == 0) {
         return;
     }
@@ -1033,7 +1214,13 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnTouchEvent(
         }
     }
 }
-
+JNIEXPORT void JNICALL
+Java_co_kr_eamobile_hl5_runner_MainActivity_nativeSetStretchMode(
+    JNIEnv* /*env*/,
+    jobject /*thiz*/,
+    jboolean stretch) {
+    g_gles_bridge.set_stretch_mode(stretch != JNI_FALSE);
+}
 
 JNIEXPORT void JNICALL
 Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnPause(

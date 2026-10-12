@@ -24,15 +24,29 @@ public class MainActivity extends Activity implements GLSurfaceView.Renderer {
 
     private GLSurfaceView glSurfaceView;
     private TextView overlayTextView;
+    private TextView aspectToggleBtn;
     private String internalPath = "";
     private String externalPath = "";
     private int frameCount = 0;
+    private boolean isStretchMode = false;
+
+    // Audio Bridge (MediaPlayer for BGM, SoundPool for SFX)
+    private java.io.File vfsFile;
+    private java.io.FileInputStream vfsAudioStream;
+    private android.media.MediaPlayer bgmPlayer;
+    private android.media.SoundPool soundPool;
+    private final java.util.HashMap<Long, Integer> soundPoolMap = new java.util.HashMap<>();
+    private final java.util.HashMap<Long, Integer> soundStreamMap = new java.util.HashMap<>();
+    private float musicVolume = 0.8f;
+    private float soundVolume = 0.8f;
+    private boolean bgmWasPlayingOnPause = false;
 
     private native String nativeRunDiagnosticTests(String internalPath, String externalPath);
     private native void nativeOnSurfaceCreated(String internalPath, String externalPath);
     private native void nativeOnSurfaceChanged(int width, int height);
     private native String nativeOnDrawFrame();
     private native void nativeOnTouchEvent(int action, float rawX, float rawY, int pointerId);
+    private native void nativeSetStretchMode(boolean stretch);
     private native void nativeOnPause();
     private native void nativeOnResume();
     private native void nativeOnDestroy();
@@ -88,7 +102,20 @@ public class MainActivity extends Activity implements GLSurfaceView.Renderer {
                         Log.w(TAG, "Asset extraction note (vfs): " + ex.getMessage());
                     }
                 }
+                vfsFile = targetVfs;
+                if (vfsFile.exists()) {
+                    vfsAudioStream = new java.io.FileInputStream(vfsFile);
+                }
             }
+            android.media.AudioAttributes audioAttrs = new android.media.AudioAttributes.Builder()
+                .setUsage(android.media.AudioAttributes.USAGE_GAME)
+                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build();
+            soundPool = new android.media.SoundPool.Builder()
+                .setMaxStreams(8)
+                .setAudioAttributes(audioAttrs)
+                .build();
+            bgmPlayer = new android.media.MediaPlayer();
         } catch (Throwable t) {
             Log.e(TAG, "Storage dir init error: " + t.getMessage());
         }
@@ -135,11 +162,182 @@ public class MainActivity extends Activity implements GLSurfaceView.Renderer {
                 overlayTextView.setVisibility(android.view.View.GONE);
             }
         });
+        aspectToggleBtn = new TextView(this);
+        aspectToggleBtn.setTextColor(Color.WHITE);
+        aspectToggleBtn.setBackgroundColor(Color.argb(140, 40, 40, 40));
+        aspectToggleBtn.setTextSize(11.0f);
+        aspectToggleBtn.setPadding(24, 12, 24, 12);
+        aspectToggleBtn.setText("5:3");
+        FrameLayout.LayoutParams btnParams = new FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            android.view.Gravity.TOP | android.view.Gravity.END);
+        btnParams.setMargins(16, 16, 16, 16);
+        aspectToggleBtn.setLayoutParams(btnParams);
+        aspectToggleBtn.setOnClickListener(new android.view.View.OnClickListener() {
+            @Override
+            public void onClick(android.view.View v) {
+                isStretchMode = !isStretchMode;
+                aspectToggleBtn.setText(isStretchMode ? "FULL" : "5:3");
+                nativeSetStretchMode(isStretchMode);
+            }
+        });
 
         layout.addView(glSurfaceView);
         layout.addView(overlayTextView);
+        layout.addView(aspectToggleBtn);
         setContentView(layout);
         hideSystemUI();
+    }
+
+    // --- Audio Bridge Callbacks (Invoked from native_runner.cpp via JNI) ---
+    public synchronized int onPutMusicClip(long clipId, long offset, long length) {
+        try {
+            if (bgmPlayer == null) {
+                bgmPlayer = new android.media.MediaPlayer();
+            } else {
+                bgmPlayer.reset();
+            }
+            if (vfsFile != null && vfsFile.exists()) {
+                try (java.io.FileInputStream fis = new java.io.FileInputStream(vfsFile)) {
+                    bgmPlayer.setDataSource(fis.getFD(), offset, length);
+                    bgmPlayer.setVolume(musicVolume, musicVolume);
+                    bgmPlayer.prepare();
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "onPutMusicClip exception: " + e.getMessage());
+        }
+        return 0;
+    }
+
+    public synchronized int onPlayMusicClip(long clipId, boolean loop) {
+        try {
+            if (bgmPlayer != null) {
+                bgmPlayer.setLooping(loop);
+                bgmPlayer.setVolume(musicVolume, musicVolume);
+                bgmPlayer.start();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "onPlayMusicClip exception: " + e.getMessage());
+        }
+        return 0;
+    }
+
+    public synchronized int onStopMusicClip(long clipId) {
+        try {
+            if (bgmPlayer != null && bgmPlayer.isPlaying()) {
+                bgmPlayer.stop();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "onStopMusicClip exception: " + e.getMessage());
+        }
+        return 0;
+    }
+
+    public synchronized int onPauseMusicClip(long clipId) {
+        try {
+            if (bgmPlayer != null && bgmPlayer.isPlaying()) {
+                bgmPlayer.pause();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "onPauseMusicClip exception: " + e.getMessage());
+        }
+        return 0;
+    }
+
+    public synchronized int onResumeMusicClip(long clipId) {
+        try {
+            if (bgmPlayer != null && !bgmPlayer.isPlaying()) {
+                bgmPlayer.start();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "onResumeMusicClip exception: " + e.getMessage());
+        }
+        return 0;
+    }
+
+    public synchronized int onFreeMusicClip(long clipId) {
+        try {
+            if (bgmPlayer != null) {
+                bgmPlayer.reset();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "onFreeMusicClip exception: " + e.getMessage());
+        }
+        return 0;
+    }
+
+    public synchronized void onSetMusicVolume(int vol) {
+        musicVolume = Math.max(0.0f, Math.min(1.0f, vol / 100.0f));
+        try {
+            if (bgmPlayer != null) {
+                bgmPlayer.setVolume(musicVolume, musicVolume);
+            }
+        } catch (Exception ignored) {}
+    }
+
+    public synchronized int onPutSoundClip(long clipId, long offset, long length, int type) {
+        try {
+            if (soundPool != null && vfsAudioStream != null) {
+                Integer oldSoundId = soundPoolMap.remove(clipId);
+                if (oldSoundId != null) {
+                    soundPool.unload(oldSoundId);
+                }
+                int soundId = soundPool.load(vfsAudioStream.getFD(), offset, length, 1);
+                soundPoolMap.put(clipId, soundId);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "onPutSoundClip exception: " + e.getMessage());
+        }
+        return 0;
+    }
+
+    public synchronized int onPlaySoundClip(long clipId, boolean loop) {
+        try {
+            if (soundPool != null) {
+                Integer soundId = soundPoolMap.get(clipId);
+                if (soundId != null) {
+                    int streamId = soundPool.play(soundId, soundVolume, soundVolume, 1, loop ? -1 : 0, 1.0f);
+                    soundStreamMap.put(clipId, streamId);
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "onPlaySoundClip exception: " + e.getMessage());
+        }
+        return 0;
+    }
+
+    public synchronized int onStopSoundClip(long clipId) {
+        try {
+            if (soundPool != null) {
+                Integer streamId = soundStreamMap.get(clipId);
+                if (streamId != null) {
+                    soundPool.stop(streamId);
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "onStopSoundClip exception: " + e.getMessage());
+        }
+        return 0;
+    }
+
+    public synchronized int onFreeSoundClip(long clipId) {
+        try {
+            if (soundPool != null) {
+                Integer soundId = soundPoolMap.remove(clipId);
+                if (soundId != null) {
+                    soundPool.unload(soundId);
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "onFreeSoundClip exception: " + e.getMessage());
+        }
+        return 0;
+    }
+
+    public synchronized void onSetSoundVolume(int vol) {
+        soundVolume = Math.max(0.0f, Math.min(1.0f, vol / 100.0f));
     }
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
@@ -193,10 +391,20 @@ public class MainActivity extends Activity implements GLSurfaceView.Renderer {
             });
         }
     }
-
     @Override
     protected void onPause() {
         super.onPause();
+        try {
+            if (bgmPlayer != null && bgmPlayer.isPlaying()) {
+                bgmWasPlayingOnPause = true;
+                bgmPlayer.pause();
+            } else {
+                bgmWasPlayingOnPause = false;
+            }
+            if (soundPool != null) {
+                soundPool.autoPause();
+            }
+        } catch (Exception ignored) {}
         if (glSurfaceView != null) glSurfaceView.onPause();
         nativeOnPause();
     }
@@ -204,13 +412,36 @@ public class MainActivity extends Activity implements GLSurfaceView.Renderer {
     @Override
     protected void onResume() {
         super.onResume();
+        hideSystemUI();
         if (glSurfaceView != null) glSurfaceView.onResume();
         nativeOnResume();
+        try {
+            if (bgmPlayer != null && bgmWasPlayingOnPause) {
+                bgmPlayer.start();
+            }
+            if (soundPool != null) {
+                soundPool.autoResume();
+            }
+        } catch (Exception ignored) {}
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        try {
+            if (bgmPlayer != null) {
+                bgmPlayer.release();
+                bgmPlayer = null;
+            }
+            if (soundPool != null) {
+                soundPool.release();
+                soundPool = null;
+            }
+            if (vfsAudioStream != null) {
+                vfsAudioStream.close();
+                vfsAudioStream = null;
+            }
+        } catch (Exception ignored) {}
         nativeOnDestroy();
     }
 }

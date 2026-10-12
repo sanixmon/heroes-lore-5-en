@@ -104,6 +104,8 @@ bool GlesBridge::initialize() {
     RESOLVE_GL(PFN_glTexSubImage2D,      glTexSubImage2D);
     RESOLVE_GL(PFN_glVertexPointer,      glVertexPointer);
     RESOLVE_GL(PFN_glViewport,           glViewport);
+    p_glClear = reinterpret_cast<PFN_glClear>(dlsym(lib_handle_, "glClear"));
+    p_glClearColor = reinterpret_cast<PFN_glClearColor>(dlsym(lib_handle_, "glClearColor"));
 
     #undef RESOLVE_GL
 
@@ -120,6 +122,19 @@ void GlesBridge::dump_status() const {
            provider_name_, gles1_supported_ ? "YES" : "NO",
            diag_.total_calls, diag_.draw_arrays_calls, diag_.bind_texture_calls,
            diag_.viewport_w, diag_.viewport_h);
+}
+void GlesBridge::apply_active_viewport() {
+    if (!p_glViewport || surface_w_ <= 0 || surface_h_ <= 0) return;
+    int32_t tx = 0, ty = 0, tw = 0, th = 0;
+    get_active_viewport(tx, ty, tw, th);
+    diag_.viewport_w = tw;
+    diag_.viewport_h = th;
+    p_glViewport(tx, ty, tw, th);
+}
+
+void GlesBridge::clear_screen() {
+    if (p_glClearColor) p_glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    if (p_glClear) p_glClear(0x00004000); // GL_COLOR_BUFFER_BIT
 }
 
 void GlesBridge::register_with_engine(Arm32NativeEngine& engine) {
@@ -173,17 +188,17 @@ void GlesBridge::register_with_engine(Arm32NativeEngine& engine) {
         int32_t vy = static_cast<int32_t>(args[1]);
         int32_t vw = static_cast<int32_t>(args[2]);
         int32_t vh = static_cast<int32_t>(args[3]);
-        diag_.viewport_w = (surface_w_ > 0) ? surface_w_ : vw;
-        diag_.viewport_h = (surface_h_ > 0) ? surface_h_ : vh;
 
-        // When physical surface size is configured, enforce true fullscreen viewport across the device:
-        int32_t target_x = (surface_w_ > 0) ? 0 : vx;
-        int32_t target_y = (surface_h_ > 0) ? 0 : vy;
-        int32_t target_w = (surface_w_ > 0) ? surface_w_ : vw;
-        int32_t target_h = (surface_h_ > 0) ? surface_h_ : vh;
-
-        if (p_glViewport) {
-            p_glViewport(target_x, target_y, target_w, target_h);
+        if (surface_w_ > 0 && surface_h_ > 0) {
+            int32_t tx = 0, ty = 0, tw = 0, th = 0;
+            get_active_viewport(tx, ty, tw, th);
+            diag_.viewport_w = tw;
+            diag_.viewport_h = th;
+            if (p_glViewport) p_glViewport(tx, ty, tw, th);
+        } else {
+            diag_.viewport_w = vw;
+            diag_.viewport_h = vh;
+            if (p_glViewport) p_glViewport(vx, vy, vw, vh);
         }
         return 0;
     });

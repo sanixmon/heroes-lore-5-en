@@ -14,6 +14,8 @@ class Arm32NativeEngine;
 
 // Typed GLES 1.1 function pointer prototypes
 typedef void (*PFN_glBindTexture)(uint32_t target, uint32_t texture);
+typedef void (*PFN_glClear)(uint32_t mask);
+typedef void (*PFN_glClearColor)(float red, float green, float blue, float alpha);
 typedef void (*PFN_glColor4f)(float red, float green, float blue, float alpha);
 typedef void (*PFN_glCullFace)(uint32_t mode);
 typedef void (*PFN_glDeleteTextures)(int32_t n, const uint32_t* textures);
@@ -75,9 +77,48 @@ public:
     void set_surface_size(int32_t width, int32_t height) {
         surface_w_ = width;
         surface_h_ = height;
+        apply_active_viewport();
     }
     int32_t surface_width() const { return surface_w_; }
     int32_t surface_height() const { return surface_h_; }
+
+    void set_stretch_mode(bool stretch) {
+        stretch_mode_ = stretch;
+        apply_active_viewport();
+    }
+    bool stretch_mode() const { return stretch_mode_; }
+
+    void get_active_viewport(int32_t& out_x, int32_t& out_y, int32_t& out_w, int32_t& out_h) const {
+        if (surface_w_ <= 0 || surface_h_ <= 0) {
+            out_x = 0;
+            out_y = 0;
+            out_w = (diag_.viewport_w > 0) ? diag_.viewport_w : 400;
+            out_h = (diag_.viewport_h > 0) ? diag_.viewport_h : 240;
+            return;
+        }
+        if (stretch_mode_) {
+            out_x = 0;
+            out_y = 0;
+            out_w = surface_w_;
+            out_h = surface_h_;
+            return;
+        }
+        // Original 5:3 (400:240) aspect ratio centered (pillarbox/letterbox)
+        if (surface_w_ * 3 > surface_h_ * 5) {
+            out_h = surface_h_;
+            out_w = (surface_h_ * 5) / 3;
+            out_x = (surface_w_ - out_w) / 2;
+            out_y = 0;
+        } else {
+            out_w = surface_w_;
+            out_h = (surface_w_ * 3) / 5;
+            out_x = 0;
+            out_y = (surface_h_ - out_h) / 2;
+        }
+    }
+
+    void apply_active_viewport();
+    void clear_screen();
 
     static inline float unpack_float(uint32_t u) {
         float f;
@@ -94,6 +135,9 @@ private:
     int32_t surface_w_ = 0;
     int32_t surface_h_ = 0;
 
+    bool stretch_mode_ = false; // Default: false (5:3 Original Aspect Ratio Centered)
+    PFN_glClear              p_glClear = nullptr;
+    PFN_glClearColor         p_glClearColor = nullptr;
     // Host GLES 1.1 Function Pointers
     PFN_glBindTexture        p_glBindTexture;
     PFN_glColor4f            p_glColor4f;
