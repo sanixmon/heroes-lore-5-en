@@ -153,32 +153,40 @@ public class MainActivity extends Activity implements GLSurfaceView.Renderer {
         overlayTextView = new TextView(this);
         overlayTextView.setTextColor(Color.GREEN);
         overlayTextView.setBackgroundColor(Color.argb(180, 0, 0, 0));
-        overlayTextView.setTextSize(12.0f);
-        overlayTextView.setPadding(20, 20, 20, 20);
-        overlayTextView.setText("HL5 ARM64 Runner initializing...");
+        overlayTextView.setTextSize(11.0f);
+        overlayTextView.setPadding(16, 12, 16, 12);
+        overlayTextView.setText("HL5 ARM64 Runner v1.2 initializing...");
+        FrameLayout.LayoutParams overlayParams = new FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            android.view.Gravity.BOTTOM | android.view.Gravity.LEFT);
+        overlayParams.setMargins(20, 20, 20, 20);
+        overlayTextView.setLayoutParams(overlayParams);
         overlayTextView.setOnClickListener(new android.view.View.OnClickListener() {
             @Override
             public void onClick(android.view.View v) {
                 overlayTextView.setVisibility(android.view.View.GONE);
             }
         });
+
         aspectToggleBtn = new TextView(this);
-        aspectToggleBtn.setTextColor(Color.WHITE);
-        aspectToggleBtn.setBackgroundColor(Color.argb(140, 40, 40, 40));
-        aspectToggleBtn.setTextSize(11.0f);
-        aspectToggleBtn.setPadding(24, 12, 24, 12);
-        aspectToggleBtn.setText("5:3");
+        aspectToggleBtn.setTextColor(Color.GREEN);
+        aspectToggleBtn.setBackgroundColor(Color.argb(220, 20, 20, 20));
+        aspectToggleBtn.setTextSize(14.0f);
+        aspectToggleBtn.setPadding(28, 16, 28, 16);
+        aspectToggleBtn.setText("[ Rasio: 5:3 ]");
+        aspectToggleBtn.setElevation(100.0f);
         FrameLayout.LayoutParams btnParams = new FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
-            android.view.Gravity.TOP | android.view.Gravity.END);
-        btnParams.setMargins(16, 16, 16, 16);
+            android.view.Gravity.TOP | android.view.Gravity.LEFT);
+        btnParams.setMargins(24, 24, 24, 24);
         aspectToggleBtn.setLayoutParams(btnParams);
         aspectToggleBtn.setOnClickListener(new android.view.View.OnClickListener() {
             @Override
             public void onClick(android.view.View v) {
                 isStretchMode = !isStretchMode;
-                aspectToggleBtn.setText(isStretchMode ? "FULL" : "5:3");
+                aspectToggleBtn.setText(isStretchMode ? "[ Rasio: FULL ]" : "[ Rasio: 5:3 ]");
                 nativeSetStretchMode(isStretchMode);
             }
         });
@@ -186,6 +194,7 @@ public class MainActivity extends Activity implements GLSurfaceView.Renderer {
         layout.addView(glSurfaceView);
         layout.addView(overlayTextView);
         layout.addView(aspectToggleBtn);
+        aspectToggleBtn.bringToFront();
         setContentView(layout);
         hideSystemUI();
     }
@@ -368,6 +377,7 @@ public class MainActivity extends Activity implements GLSurfaceView.Renderer {
     public void onSurfaceChanged(GL10 gl, int width, int height) {
         Log.i(TAG, "GLThread: onSurfaceChanged: " + width + "x" + height);
         nativeOnSurfaceChanged(width, height);
+        nativeSetStretchMode(isStretchMode);
     }
 
     @Override

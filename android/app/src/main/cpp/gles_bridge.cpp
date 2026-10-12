@@ -133,8 +133,12 @@ void GlesBridge::apply_active_viewport() {
 }
 
 void GlesBridge::clear_screen() {
+    if (p_glViewport && surface_w_ > 0 && surface_h_ > 0) {
+        p_glViewport(0, 0, surface_w_, surface_h_);
+    }
     if (p_glClearColor) p_glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     if (p_glClear) p_glClear(0x00004000); // GL_COLOR_BUFFER_BIT
+    apply_active_viewport();
 }
 
 void GlesBridge::register_with_engine(Arm32NativeEngine& engine) {
@@ -338,6 +342,7 @@ void GlesBridge::register_with_engine(Arm32NativeEngine& engine) {
             }
         }
 
+        apply_active_viewport();
         if (p_glDrawArrays) {
             p_glDrawArrays(mode, first, count);
         }
