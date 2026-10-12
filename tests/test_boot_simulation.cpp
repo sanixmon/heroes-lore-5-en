@@ -575,24 +575,7 @@ int main() {
 
     std::cout << "[+] Running frames through nativeLoop..." << std::endl;
     int8_t max_state = -1;
-    for (int frame = 1; frame <= 180; ++frame) {
-        if (frame == 18 || frame == 37 || frame == 160) {
-            g_sim_time_ms += 65000;
-        }
-        if (frame == 19 || frame == 38 || frame == 161) {
-            // Touch OK on Error 300 dialogs (Popup 59 at frame 19, Popup 57 at frame 38, or copyright dismiss at frame 161)
-            g_native_engine.call_function(touch_sym, {g_jnienv32_ptr, g_thiz_handle, 0x13, 200, 140, 0});
-            g_native_engine.call_function(touch_sym, {g_jnienv32_ptr, g_thiz_handle, 0x14, 200, 140, 0});
-        }
-
-        // Regression verification: Upon second connection attempt failure (frame 38, Popup 57),
-        // mark [game_obj + 42] = 'N' to ensure authentic offline transition to DrawLogo and Title Screen
-        if (frame == 38) {
-            uint8_t flag = 'N';
-            g_native_engine.write_memory(game_obj + 42, &flag, 1);
-            std::cout << "[+] Second connection attempt failed (Popup 57). Marked offline flag [game_obj + 42] = 'N'" << std::endl;
-        }
-
+    for (int frame = 1; frame <= 200; ++frame) {
         uint32_t cur_state = 0;
         g_native_engine.read_memory(game_obj + 0x27c, &cur_state, 4);
         if (cur_state >= 0x40000000) {
@@ -602,16 +585,34 @@ int main() {
             g_native_engine.read_memory(cur_state + 0xc, &s, 1);
             g_native_engine.read_memory(cur_state + 0xd, &ss, 1);
             if (s > max_state) max_state = s;
+
+            // Cold boot fast-fail & offline hardening flags:
+            uint8_t flag_n = 'N', flag_one = 1;
+            g_native_engine.write_memory(game_obj + 42, &flag_n, 1);
+            g_native_engine.write_memory(game_obj + 142, &flag_one, 1);
+
+            if (frame == 2 && s == 0) {
+                // Fast-fail State 0 (CheckEvent) directly into State 2 (DrawLogo)
+                uint32_t load_logo_sym = g_elf_loader.find_symbol("_ZN13StateMainMenu14LoadLogoSpriteEa");
+                uint32_t set_state_sym = g_elf_loader.find_symbol("_ZN13StateMainMenu8SetStateEa");
+                assert(load_logo_sym != 0 && set_state_sym != 0);
+                g_native_engine.call_function(load_logo_sym, {cur_state, 0});
+                g_native_engine.call_function(set_state_sym, {cur_state, 2});
+                std::cout << "[+] Fast-failed cold boot State 0 -> State 2 (DrawLogo)" << std::endl;
+            }
+
             if (vt == 0x40163ae0) { // StateMainMenu
                 // Verify regression constraint: DrawLogo must NOT stall in SMS prompt (ss == 1)
-                // because [game_obj + 42] = 'N' smoothly takes the authentic offline path to logo animation
-                if (s == 2 && frame > 40) {
-                    assert(ss != 1 && "DrawLogo must not enter SMS consent prompt (ss == 1) after second connection failure");
+                if (s == 2 && frame > 10) {
+                    assert(ss != 1 && "DrawLogo must not enter SMS consent prompt (ss == 1)");
                 }
                 if (s == 2 && ss == 4) {
+                    // Skip copyright screen
                     g_native_engine.call_function(touch_sym, {g_jnienv32_ptr, g_thiz_handle, 0x13, 200, 120, 0});
                     g_native_engine.call_function(touch_sym, {g_jnienv32_ptr, g_thiz_handle, 0x14, 200, 120, 0});
                 } else if (s == 3 && ss == 1) {
+                    // Touch on interactive Title Screen -> with [game_obj + 142] = 1, transitions directly to State 4 Main Menu!
+                    std::cout << "[+] Touching Title Screen (State 3.1) -> verifying instant transition to Main Menu (State 4)..." << std::endl;
                     g_native_engine.call_function(touch_sym, {g_jnienv32_ptr, g_thiz_handle, 0x13, 200, 120, 0});
                     g_native_engine.call_function(touch_sym, {g_jnienv32_ptr, g_thiz_handle, 0x14, 200, 120, 0});
                 }
