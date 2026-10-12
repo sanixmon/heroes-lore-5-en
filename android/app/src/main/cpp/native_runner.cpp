@@ -228,10 +228,17 @@ void setup_jni_bridge() {
             if (name == "totalMemory") return {true, 128 * 1024 * 1024};
             if (name == "isNetworkAvailable") return {true, 0};
             // Audio Bridge: Music (MediaPlayer) & Sound Effects (SoundPool)
-            if (name == "putMusicClip" && extra_args.size() >= 6) {
-                int64_t clip_id = (static_cast<int64_t>(extra_args[1]) << 32) | extra_args[0];
-                int64_t offset  = (static_cast<int64_t>(extra_args[3]) << 32) | extra_args[2];
-                int64_t length  = (static_cast<int64_t>(extra_args[5]) << 32) | extra_args[4];
+            // Note: In ARM EABI variadic JNI calls (_JNIEnv::CallStaticIntMethod(env, cls, mid, ...)),
+            // r0=env, r1=cls, r2=mid, and r3 is pushed into extra_args[0] as 8-byte alignment padding
+            // whenever the first variadic parameter is a 64-bit jlong!
+            // Therefore, for methods starting with jlong clipId:
+            //   clip_id = (extra_args[2] << 32) | extra_args[1]
+            //   offset  = (extra_args[4] << 32) | extra_args[3]
+            //   length  = (extra_args[6] << 32) | extra_args[5]
+            if (name == "putMusicClip" && extra_args.size() >= 7) {
+                int64_t clip_id = (static_cast<int64_t>(extra_args[2]) << 32) | extra_args[1];
+                int64_t offset  = (static_cast<int64_t>(extra_args[4]) << 32) | extra_args[3];
+                int64_t length  = (static_cast<int64_t>(extra_args[6]) << 32) | extra_args[5];
                 JNIEnv* env = get_host_env();
                 if (env && g_host_activity_ref && g_mid_put_music) {
                     env->CallIntMethod(g_host_activity_ref, g_mid_put_music,
@@ -239,9 +246,9 @@ void setup_jni_bridge() {
                 }
                 return {true, 0};
             }
-            if (name == "clipPlayMusic" && extra_args.size() >= 3) {
-                int64_t clip_id = (static_cast<int64_t>(extra_args[1]) << 32) | extra_args[0];
-                bool loop = (extra_args[2] & 0xFF) != 0;
+            if (name == "clipPlayMusic" && extra_args.size() >= 4) {
+                int64_t clip_id = (static_cast<int64_t>(extra_args[2]) << 32) | extra_args[1];
+                bool loop = (extra_args[3] & 0xFF) != 0;
                 JNIEnv* env = get_host_env();
                 if (env && g_host_activity_ref && g_mid_play_music) {
                     env->CallIntMethod(g_host_activity_ref, g_mid_play_music,
@@ -249,32 +256,32 @@ void setup_jni_bridge() {
                 }
                 return {true, 0};
             }
-            if (name == "clipStopMusic" && extra_args.size() >= 2) {
-                int64_t clip_id = (static_cast<int64_t>(extra_args[1]) << 32) | extra_args[0];
+            if (name == "clipStopMusic" && extra_args.size() >= 3) {
+                int64_t clip_id = (static_cast<int64_t>(extra_args[2]) << 32) | extra_args[1];
                 JNIEnv* env = get_host_env();
                 if (env && g_host_activity_ref && g_mid_stop_music) {
                     env->CallIntMethod(g_host_activity_ref, g_mid_stop_music, static_cast<jlong>(clip_id));
                 }
                 return {true, 0};
             }
-            if (name == "clipPauseMusic" && extra_args.size() >= 2) {
-                int64_t clip_id = (static_cast<int64_t>(extra_args[1]) << 32) | extra_args[0];
+            if (name == "clipPauseMusic" && extra_args.size() >= 3) {
+                int64_t clip_id = (static_cast<int64_t>(extra_args[2]) << 32) | extra_args[1];
                 JNIEnv* env = get_host_env();
                 if (env && g_host_activity_ref && g_mid_pause_music) {
                     env->CallIntMethod(g_host_activity_ref, g_mid_pause_music, static_cast<jlong>(clip_id));
                 }
                 return {true, 0};
             }
-            if (name == "clipResumeMusic" && extra_args.size() >= 2) {
-                int64_t clip_id = (static_cast<int64_t>(extra_args[1]) << 32) | extra_args[0];
+            if (name == "clipResumeMusic" && extra_args.size() >= 3) {
+                int64_t clip_id = (static_cast<int64_t>(extra_args[2]) << 32) | extra_args[1];
                 JNIEnv* env = get_host_env();
                 if (env && g_host_activity_ref && g_mid_resume_music) {
                     env->CallIntMethod(g_host_activity_ref, g_mid_resume_music, static_cast<jlong>(clip_id));
                 }
                 return {true, 0};
             }
-            if (name == "clipFreeMusic" && extra_args.size() >= 2) {
-                int64_t clip_id = (static_cast<int64_t>(extra_args[1]) << 32) | extra_args[0];
+            if (name == "clipFreeMusic" && extra_args.size() >= 3) {
+                int64_t clip_id = (static_cast<int64_t>(extra_args[2]) << 32) | extra_args[1];
                 JNIEnv* env = get_host_env();
                 if (env && g_host_activity_ref && g_mid_free_music) {
                     env->CallIntMethod(g_host_activity_ref, g_mid_free_music, static_cast<jlong>(clip_id));
@@ -292,11 +299,11 @@ void setup_jni_bridge() {
             if (name == "getMusicVolume") {
                 return {true, static_cast<uint32_t>(g_music_volume)};
             }
-            if (name == "putSoundClip" && extra_args.size() >= 6) {
-                int64_t clip_id = (static_cast<int64_t>(extra_args[1]) << 32) | extra_args[0];
-                int64_t offset  = (static_cast<int64_t>(extra_args[3]) << 32) | extra_args[2];
-                int64_t length  = (static_cast<int64_t>(extra_args[5]) << 32) | extra_args[4];
-                int32_t type    = (extra_args.size() >= 7) ? static_cast<int32_t>(extra_args[6]) : 0;
+            if (name == "putSoundClip" && extra_args.size() >= 7) {
+                int64_t clip_id = (static_cast<int64_t>(extra_args[2]) << 32) | extra_args[1];
+                int64_t offset  = (static_cast<int64_t>(extra_args[4]) << 32) | extra_args[3];
+                int64_t length  = (static_cast<int64_t>(extra_args[6]) << 32) | extra_args[5];
+                int32_t type    = (extra_args.size() >= 8) ? static_cast<int32_t>(extra_args[7]) : 0;
                 JNIEnv* env = get_host_env();
                 if (env && g_host_activity_ref && g_mid_put_sound) {
                     env->CallIntMethod(g_host_activity_ref, g_mid_put_sound,
@@ -305,9 +312,9 @@ void setup_jni_bridge() {
                 }
                 return {true, 0};
             }
-            if (name == "clipPlaySound" && extra_args.size() >= 3) {
-                int64_t clip_id = (static_cast<int64_t>(extra_args[1]) << 32) | extra_args[0];
-                bool loop = (extra_args[2] & 0xFF) != 0;
+            if (name == "clipPlaySound" && extra_args.size() >= 4) {
+                int64_t clip_id = (static_cast<int64_t>(extra_args[2]) << 32) | extra_args[1];
+                bool loop = (extra_args[3] & 0xFF) != 0;
                 JNIEnv* env = get_host_env();
                 if (env && g_host_activity_ref && g_mid_play_sound) {
                     env->CallIntMethod(g_host_activity_ref, g_mid_play_sound,
@@ -315,19 +322,19 @@ void setup_jni_bridge() {
                 }
                 return {true, 0};
             }
-            if ((name == "clipStopSound" || name == "clipPauseSound") && extra_args.size() >= 2) {
-                int64_t clip_id = (static_cast<int64_t>(extra_args[1]) << 32) | extra_args[0];
+            if ((name == "clipStopSound" || name == "clipPauseSound") && extra_args.size() >= 3) {
+                int64_t clip_id = (static_cast<int64_t>(extra_args[2]) << 32) | extra_args[1];
                 JNIEnv* env = get_host_env();
                 if (env && g_host_activity_ref && g_mid_stop_sound) {
                     env->CallIntMethod(g_host_activity_ref, g_mid_stop_sound, static_cast<jlong>(clip_id));
                 }
                 return {true, 0};
             }
-            if (name == "clipResumeSound" && extra_args.size() >= 2) {
+            if (name == "clipResumeSound" && extra_args.size() >= 3) {
                 return {true, 0};
             }
-            if (name == "clipFreeSound" && extra_args.size() >= 2) {
-                int64_t clip_id = (static_cast<int64_t>(extra_args[1]) << 32) | extra_args[0];
+            if (name == "clipFreeSound" && extra_args.size() >= 3) {
+                int64_t clip_id = (static_cast<int64_t>(extra_args[2]) << 32) | extra_args[1];
                 JNIEnv* env = get_host_env();
                 if (env && g_host_activity_ref && g_mid_free_sound) {
                     env->CallIntMethod(g_host_activity_ref, g_mid_free_sound, static_cast<jlong>(clip_id));
@@ -1070,6 +1077,14 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnDrawFrame(
                         uint8_t flag = 1;
                         g_native_engine.write_memory(game_obj + 142, &flag, 1);
                     }
+                    // Enable Fixed D-Pad mode ([game_obj + 143] |= 1) so the virtual directional pad
+                    // is anchored at (65, 175) and responds immediately to directional button taps.
+                    uint8_t dpad_opt = 0;
+                    g_native_engine.read_memory(game_obj + 143, &dpad_opt, 1);
+                    if ((dpad_opt & 1) == 0) {
+                        dpad_opt |= 1;
+                        g_native_engine.write_memory(game_obj + 143, &dpad_opt, 1);
+                    }
 
                     // ONLY apply StateMainMenu transitions when state_ptr is an instance of StateMainMenu
                     // (vtable == 0x40163ae0). Never invoke StateMainMenu methods on StatePopup (0x40163cc0)
@@ -1202,7 +1217,62 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnTouchEvent(
             // JNI signature: nativeTouchHandleEvent(JNIEnv* env, jobject thiz, jint type, jint x, jint y, jint id)
             // In Unicorn guest execution:
             // R0 = jnienv (0), R1 = thiz (0), R2 = type, R3 = x
-            // [sp + 0] = y, [sp + 4] = pointerId
+            uint32_t game_obj = 0;
+            g_native_engine.read_memory(0x40164368, &game_obj, 4);
+            uint32_t active_vt = 0;
+            if (game_obj >= 0x40000000) {
+                uint32_t st_ptr = 0;
+                g_native_engine.read_memory(game_obj + 0x27c, &st_ptr, 4);
+                if (st_ptr >= 0x40000000) {
+                    g_native_engine.read_memory(st_ptr, &active_vt, 4);
+                }
+            }
+
+            // In StateGame (vtable 0x40163860), ensure the virtual D-Pad never locks on a stale pointerId
+            // and immediately triggers directional movement (0x15 MOVE) on initial D-Pad press (0x13 DOWN):
+            if (active_vt == 0x40163860 && game_obj >= 0x40000000) {
+                if (event_type == 0x13 && game_x < 140 && game_y > 100) {
+                    uint8_t zero = 0;
+                    g_native_engine.write_memory(game_obj + 293, &zero, 1);
+                    g_native_engine.call_function(touch_sym, {g_jnienv32_ptr, g_thiz_handle,
+                                                              0x13,
+                                                              static_cast<uint32_t>(game_x),
+                                                              static_cast<uint32_t>(game_y),
+                                                              static_cast<uint32_t>(pointerId)});
+                    g_native_engine.call_function(touch_sym, {g_jnienv32_ptr, g_thiz_handle,
+                                                              0x15,
+                                                              static_cast<uint32_t>(game_x),
+                                                              static_cast<uint32_t>(game_y),
+                                                              static_cast<uint32_t>(pointerId)});
+                    g_touch_events_dispatched += 2;
+                    return;
+                } else if (event_type == 0x14) {
+                    uint8_t active_joy = 0;
+                    int8_t joy_pid = -1;
+                    g_native_engine.read_memory(game_obj + 293, &active_joy, 1);
+                    g_native_engine.read_memory(game_obj + 292, &joy_pid, 1);
+                    g_native_engine.call_function(touch_sym, {g_jnienv32_ptr, g_thiz_handle,
+                                                              0x14,
+                                                              static_cast<uint32_t>(game_x),
+                                                              static_cast<uint32_t>(game_y),
+                                                              static_cast<uint32_t>(pointerId)});
+                    // If the analog stick was active and this release is on the left side or matches joy_pid, ensure clean release
+                    if (active_joy != 0 && (pointerId == joy_pid || game_x < 160)) {
+                        if (pointerId != joy_pid && joy_pid >= 0) {
+                            g_native_engine.call_function(touch_sym, {g_jnienv32_ptr, g_thiz_handle,
+                                                                      0x14,
+                                                                      static_cast<uint32_t>(game_x),
+                                                                      static_cast<uint32_t>(game_y),
+                                                                      static_cast<uint32_t>(joy_pid)});
+                        }
+                        uint8_t zero = 0;
+                        g_native_engine.write_memory(game_obj + 293, &zero, 1);
+                    }
+                    g_touch_events_dispatched++;
+                    return;
+                }
+            }
+
             g_native_engine.call_function(touch_sym, {g_jnienv32_ptr, g_thiz_handle,
                                                       static_cast<uint32_t>(event_type),
                                                       static_cast<uint32_t>(game_x),

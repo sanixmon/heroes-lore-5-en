@@ -128,24 +128,36 @@ public class MainActivity extends Activity implements GLSurfaceView.Renderer {
             @Override
             public boolean onTouch(android.view.View v, android.view.MotionEvent event) {
                 int actionMasked = event.getActionMasked();
+                int pointerCount = event.getPointerCount();
+
+                if (actionMasked == android.view.MotionEvent.ACTION_MOVE) {
+                    // Dispatch MOVE for all active pointers (supports multi-touch D-Pad + Attack)
+                    for (int i = 0; i < pointerCount; i++) {
+                        int pid = event.getPointerId(i);
+                        nativeOnTouchEvent(2, event.getX(i), event.getY(i), pid);
+                    }
+                    return true;
+                }
+
+                if (actionMasked == android.view.MotionEvent.ACTION_CANCEL) {
+                    for (int i = 0; i < pointerCount; i++) {
+                        int pid = event.getPointerId(i);
+                        nativeOnTouchEvent(1, event.getX(i), event.getY(i), pid);
+                    }
+                    return true;
+                }
+
                 int pointerIndex = event.getActionIndex();
                 int pointerId = event.getPointerId(pointerIndex);
                 float x = event.getX(pointerIndex);
                 float y = event.getY(pointerIndex);
 
-                int hlAction = -1;
                 if (actionMasked == android.view.MotionEvent.ACTION_DOWN ||
                     actionMasked == android.view.MotionEvent.ACTION_POINTER_DOWN) {
-                    hlAction = 0; // DOWN
+                    nativeOnTouchEvent(0, x, y, pointerId);
                 } else if (actionMasked == android.view.MotionEvent.ACTION_UP ||
                            actionMasked == android.view.MotionEvent.ACTION_POINTER_UP) {
-                    hlAction = 1; // UP
-                } else if (actionMasked == android.view.MotionEvent.ACTION_MOVE) {
-                    hlAction = 2; // MOVE
-                }
-
-                if (hlAction != -1) {
-                    nativeOnTouchEvent(hlAction, x, y, pointerId);
+                    nativeOnTouchEvent(1, x, y, pointerId);
                 }
                 return true;
             }
@@ -278,7 +290,12 @@ public class MainActivity extends Activity implements GLSurfaceView.Renderer {
     }
 
     public synchronized void onSetMusicVolume(int vol) {
-        musicVolume = Math.max(0.0f, Math.min(1.0f, vol / 100.0f));
+        if (vol <= 0) {
+            musicVolume = 0.0f;
+        } else {
+            // Game default level 1 passes vol=10; boost curve so level 1 is clearly audible (0.6f..1.0f)
+            musicVolume = Math.min(1.0f, Math.max(0.6f, vol / 100.0f));
+        }
         try {
             if (bgmPlayer != null) {
                 bgmPlayer.setVolume(musicVolume, musicVolume);
@@ -288,13 +305,15 @@ public class MainActivity extends Activity implements GLSurfaceView.Renderer {
 
     public synchronized int onPutSoundClip(long clipId, long offset, long length, int type) {
         try {
-            if (soundPool != null && vfsAudioStream != null) {
+            if (soundPool != null && vfsFile != null && vfsFile.exists()) {
                 Integer oldSoundId = soundPoolMap.remove(clipId);
                 if (oldSoundId != null) {
                     soundPool.unload(oldSoundId);
                 }
-                int soundId = soundPool.load(vfsAudioStream.getFD(), offset, length, 1);
-                soundPoolMap.put(clipId, soundId);
+                try (java.io.FileInputStream fis = new java.io.FileInputStream(vfsFile)) {
+                    int soundId = soundPool.load(fis.getFD(), offset, length, 1);
+                    soundPoolMap.put(clipId, soundId);
+                }
             }
         } catch (Exception e) {
             Log.w(TAG, "onPutSoundClip exception: " + e.getMessage());
@@ -346,7 +365,11 @@ public class MainActivity extends Activity implements GLSurfaceView.Renderer {
     }
 
     public synchronized void onSetSoundVolume(int vol) {
-        soundVolume = Math.max(0.0f, Math.min(1.0f, vol / 100.0f));
+        if (vol <= 0) {
+            soundVolume = 0.0f;
+        } else {
+            soundVolume = Math.min(1.0f, Math.max(0.6f, vol / 100.0f));
+        }
     }
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {

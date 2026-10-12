@@ -67,7 +67,7 @@ flowchart TB
 
 | Build | Target Devices | Features | Download & Checksums |
 |---|---|---|---|
-| **`hl5-runner-arm64-v8a-v2.apk`** *(Recommended)* | **All Modern Android 8.0–16 Devices (`arm64-v8a`)**<br/>Includes 64-bit-only phones & 16KB page devices | • Native ARM64 Unicorn Bridge<br/>• Instant Offline Boot (<2s)<br/>• `[ Rasio: 5:3 ]` / `[ Rasio: FULL ]` Switcher<br/>• Full BGM & SFX Audio Bridge<br/>• 100% English Localization | **[Download via Gofile](https://gofile.io/d/OwtCnO5K)**<br/>Size: `32,686,700 bytes` (~31.2 MB)<br/>MD5: `5bd312f6a98b711a8a2d30609f672183`<br/>SHA-256: `e99412de71910f6f2b98fb2ddcdf230b71daa3b22b264f5bccf17176500050d0` |
+| **`hl5-runner-arm64-v8a-v3.apk`** *(Recommended)* | **All Modern Android 8.0–16 Devices (`arm64-v8a`)**<br/>Includes 64-bit-only phones & 16KB page devices | • Native ARM64 Unicorn Bridge<br/>• Original App Icon & Label<br/>• Instant Offline Boot (<2s)<br/>• `[ Rasio: 5:3 ]` / `[ Rasio: FULL ]` Switcher<br/>• Fixed D-Pad & Multi-Touch Analog<br/>• Full BGM & SFX Audio Bridge<br/>• 100% English Localization | **[Download via Gofile](https://gofile.io/d/RCK4SGLJ)**<br/>Size: `32,727,952 bytes` (~31.2 MB)<br/>MD5: `78013d775b36ee6f897f2dc659e28415`<br/>SHA-256: `90f6f64a2712e8cb3ddb068f15318eefdb04d39ab59658200a957b8fbb7387e5` |
 | **`hl5-en.apk`** *(Legacy 32-Bit)* | Legacy 32-bit `armeabi-v7a` devices or 32-bit containers | • Original 32-bit APK wrapper<br/>• 100% English Localization | **[Download via Gofile](https://gofile.io/d/kRCMIMLs)**<br/>Size: `18,478,102 bytes`<br/>SHA-256: `61ab40442b28bb69731ea2a9bde72c71137fa8b4d4324f8ca7e2ac30a1424d11` |
 
 ---
