@@ -863,6 +863,8 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnDrawFrame(
                 uint32_t state_ptr = 0;
                 g_native_engine.read_memory(game_obj + 0x27c, &state_ptr, 4);
                 if (state_ptr >= 0x40000000) {
+                    uint32_t vtable = 0;
+                    g_native_engine.read_memory(state_ptr, &vtable, 4);
                     int8_t s_id = 0, ss_id = 0, p_id = 0;
                     g_native_engine.read_memory(state_ptr + 0xc, &s_id, 1);
                     g_native_engine.read_memory(state_ptr + 0xd, &ss_id, 1);
@@ -870,11 +872,10 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnDrawFrame(
                     g_current_game_state = s_id;
                     g_current_game_substate = ss_id;
                     g_current_game_popup = p_id;
+
                     // Authentic Offline Hardening:
-                    // 1. Cold boot fast-fail: State 0 (CheckEvent) normally stalls 60s on netConnect(9).
-                    //    Fast-fail cold boot directly to State 2 (DrawLogo) so game opens into logo/title in <2s.
-                    // 2. Mark legacy carrier SMS flag [game_obj + 42] = 'N' (0x4E) to skip SMS consent loop.
-                    // 3. Mark cloud save check flag [game_obj + 142] = 1 (0x01) so Title Screen and Data Management
+                    // 1. Mark legacy carrier SMS flag [game_obj + 42] = 'N' (0x4E) to skip SMS consent loop.
+                    // 2. Mark cloud save check flag [game_obj + 142] = 1 (0x01) so Title Screen and Data Management
                     //    bypass DSPSock::DSP_Connect() and transition directly to Main Menu (State 4) & local storage.
                     uint8_t sms_flag = 0, server_check_flag = 0;
                     g_native_engine.read_memory(game_obj + 42, &sms_flag, 1);
@@ -889,28 +890,33 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnDrawFrame(
                         g_native_engine.write_memory(game_obj + 142, &flag, 1);
                     }
 
-                    if (s_id == 0) {
-                        // Cold boot fast-fail: bypass 60s dead-server CheckEvent hang
-                        uint32_t load_logo_sym = g_elf_loader.find_symbol("_ZN13StateMainMenu14LoadLogoSpriteEa");
-                        uint32_t set_state_sym = g_elf_loader.find_symbol("_ZN13StateMainMenu8SetStateEa");
-                        if (load_logo_sym != 0 && set_state_sym != 0) {
-                            g_native_engine.call_function(load_logo_sym, {state_ptr, 0});
-                            g_native_engine.call_function(set_state_sym, {state_ptr, 2});
-                            LOGI("[OFFLINE_HARDENING] Fast-failed cold boot State 0 (CheckEvent) -> State 2 (DrawLogo)");
+                    // ONLY apply StateMainMenu transitions when state_ptr is an instance of StateMainMenu
+                    // (vtable == 0x40163ae0). Never invoke StateMainMenu methods on StatePopup (0x40163cc0)
+                    // or StateGame (0x40163860), as StatePopup has 0 at offset 0xc and would be corrupted!
+                    if (vtable == 0x40163ae0) {
+                        if (s_id == 0) {
+                            // Cold boot fast-fail: bypass 60s dead-server CheckEvent hang
+                            uint32_t load_logo_sym = g_elf_loader.find_symbol("_ZN13StateMainMenu14LoadLogoSpriteEa");
+                            uint32_t set_state_sym = g_elf_loader.find_symbol("_ZN13StateMainMenu8SetStateEa");
+                            if (load_logo_sym != 0 && set_state_sym != 0) {
+                                g_native_engine.call_function(load_logo_sym, {state_ptr, 0});
+                                g_native_engine.call_function(set_state_sym, {state_ptr, 2});
+                                LOGI("[OFFLINE_HARDENING] Fast-failed cold boot State 0 (CheckEvent) -> State 2 (DrawLogo)");
+                            }
+                        } else if (s_id == 2 && ss_id == 1) {
+                            // If SMS consent prompt (SubState 1) was somehow entered, cleanly recover to Logo Animation (SubState 3)
+                            uint32_t load_logo_sym = g_elf_loader.find_symbol("_ZN13StateMainMenu14LoadLogoSpriteEa");
+                            uint32_t set_sub_sym = g_elf_loader.find_symbol("_ZN13StateMainMenu11SetSubStateEa");
+                            if (load_logo_sym != 0 && set_sub_sym != 0) {
+                                g_native_engine.call_function(load_logo_sym, {state_ptr, 1});
+                                g_native_engine.call_function(set_sub_sym, {state_ptr, 3});
+                                LOGI("[OFFLINE_HARDENING] Recovered from SMS consent prompt (SubState 1) -> Logo Animation (SubState 3)");
+                            }
+                        } else if (s_id == 3) {
+                            // In State 3 (Title Screen), ensure [game_obj + 142] = 1 is locked so touches advance to State 4 Main Menu
+                            uint8_t flag = 1;
+                            g_native_engine.write_memory(game_obj + 142, &flag, 1);
                         }
-                    } else if (s_id == 2 && ss_id == 1) {
-                        // If SMS consent prompt (SubState 1) was somehow entered, cleanly recover to Logo Animation (SubState 3)
-                        uint32_t load_logo_sym = g_elf_loader.find_symbol("_ZN13StateMainMenu14LoadLogoSpriteEa");
-                        uint32_t set_sub_sym = g_elf_loader.find_symbol("_ZN13StateMainMenu11SetSubStateEa");
-                        if (load_logo_sym != 0 && set_sub_sym != 0) {
-                            g_native_engine.call_function(load_logo_sym, {state_ptr, 1});
-                            g_native_engine.call_function(set_sub_sym, {state_ptr, 3});
-                            LOGI("[OFFLINE_HARDENING] Recovered from SMS consent prompt (SubState 1) -> Logo Animation (SubState 3)");
-                        }
-                    } else if (s_id == 3) {
-                        // In State 3 (Title Screen), ensure [game_obj + 142] = 1 is locked so touches advance to State 4 Main Menu
-                        uint8_t flag = 1;
-                        g_native_engine.write_memory(game_obj + 142, &flag, 1);
                     }
                 }
             }

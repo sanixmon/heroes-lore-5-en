@@ -591,7 +591,7 @@ int main() {
             g_native_engine.write_memory(game_obj + 42, &flag_n, 1);
             g_native_engine.write_memory(game_obj + 142, &flag_one, 1);
 
-            if (frame == 2 && s == 0) {
+            if (vt == 0x40163ae0 && frame == 2 && s == 0) {
                 // Fast-fail State 0 (CheckEvent) directly into State 2 (DrawLogo)
                 uint32_t load_logo_sym = g_elf_loader.find_symbol("_ZN13StateMainMenu14LoadLogoSpriteEa");
                 uint32_t set_state_sym = g_elf_loader.find_symbol("_ZN13StateMainMenu8SetStateEa");
@@ -600,7 +600,6 @@ int main() {
                 g_native_engine.call_function(set_state_sym, {cur_state, 2});
                 std::cout << "[+] Fast-failed cold boot State 0 -> State 2 (DrawLogo)" << std::endl;
             }
-
             if (vt == 0x40163ae0) { // StateMainMenu
                 // Verify regression constraint: DrawLogo must NOT stall in SMS prompt (ss == 1)
                 if (s == 2 && frame > 10) {
@@ -658,6 +657,45 @@ int main() {
     std::cout << "[+] FrameBuffer=0x" << std::hex << fb_ptr << std::dec
               << ", Unique Colors=" << unique_colors.size() << std::endl;
     assert(unique_colors.size() >= 100);
+    // Verify Class Selection Popup (StatePopup vtable 0x40163cc0) is not corrupted and transitions into StateGame!
+    uint32_t set_state_sym = g_elf_loader.find_symbol("_ZN13StateMainMenu8SetStateEa");
+    uint32_t key_start_sym = g_elf_loader.find_symbol("_ZN13StateMainMenu8KeyStartEi");
+    assert(set_state_sym != 0 && key_start_sym != 0);
+
+    // Enter State 5 (Slot Select) -> Select Slot 0 -> Select Class 0 (Warrior) -> Opens StatePopup (type 8)
+    g_native_engine.call_function(set_state_sym, {cur_st, 5});
+    g_native_engine.call_function(loop_sym, {g_jnienv32_ptr, g_thiz_handle}, 10000000);
+    g_native_engine.call_function(key_start_sym, {cur_st, 0xfffffffb}); // Select Slot 0
+    g_native_engine.call_function(loop_sym, {g_jnienv32_ptr, g_thiz_handle}, 10000000);
+    g_native_engine.call_function(key_start_sym, {cur_st, 0xfffffffb}); // Select Class 0 -> Popup 4
+    g_native_engine.call_function(loop_sym, {g_jnienv32_ptr, g_thiz_handle}, 10000000);
+
+    uint32_t popup_st = 0;
+    g_native_engine.read_memory(game_obj + 0x27c, &popup_st, 4);
+    uint32_t popup_vt = 0;
+    g_native_engine.read_memory(popup_st, &popup_vt, 4);
+    int8_t popup_type = 0, popup_btns = 0;
+    g_native_engine.read_memory(popup_st + 14, &popup_type, 1);
+    g_native_engine.read_memory(popup_st + 16, &popup_btns, 1);
+    std::cout << "[+] Class Selection Popup opened: vtable=0x" << std::hex << popup_vt << std::dec
+              << ", type=" << (int)popup_type << ", buttons=" << (int)popup_btns << std::endl;
+    assert(popup_vt == 0x40163cc0);
+    assert(popup_type == 8);
+    assert(popup_btns == 2);
+
+    // Touch YES (155, 195) on Class Selection Popup to proceed into StateGame!
+    g_native_engine.call_function(touch_sym, {g_jnienv32_ptr, g_thiz_handle, 0x13, 155, 195, 0});
+    g_native_engine.call_function(touch_sym, {g_jnienv32_ptr, g_thiz_handle, 0x14, 155, 195, 0});
+    g_native_engine.call_function(loop_sym, {g_jnienv32_ptr, g_thiz_handle}, 10000000);
+    g_native_engine.call_function(loop_sym, {g_jnienv32_ptr, g_thiz_handle}, 10000000);
+
+    uint32_t game_st = 0;
+    g_native_engine.read_memory(game_obj + 0x27c, &game_st, 4);
+    uint32_t game_vt = 0;
+    g_native_engine.read_memory(game_st, &game_vt, 4);
+    std::cout << "[+] After Class Selection Popup confirmation: active state vtable=0x" << std::hex << game_vt << std::dec << std::endl;
+    assert(game_vt == 0x40163860 && "Must transition cleanly into StateGame (0x40163860) after confirming class selection!");
+    std::cout << "[PASS] Class Selection Popup verified intact and transitioned into StateGame!" << std::endl;
 
     std::cout << "\n[PASS] Reached Original Title Screen (State 3) in Native C++ on AArch64!" << std::endl;
     return 0;
