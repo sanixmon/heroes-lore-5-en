@@ -10,3 +10,5 @@ extracted/
 __pycache__/
 *.pyc
 .pytest_cache/
+android/app/build/
+tests/test_boot_simulation
