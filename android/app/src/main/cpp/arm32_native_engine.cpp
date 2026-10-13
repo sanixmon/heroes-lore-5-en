@@ -5,6 +5,12 @@
 #include <stdexcept>
 #include <cmath>
 #include <sys/time.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <cstdio>
+#include <cerrno>
+#include "hl5_save_trace.h"
 #ifdef __ANDROID__
 #include <android/log.h>
 #define LOG_TAG "HL5_Arm32Engine"
@@ -163,6 +169,11 @@ uint32_t Arm32NativeEngine::get_or_create_hook(const std::string& name) {
         return 0;
     });
 }
+
+// Save-path fd tracker for targeted diagnostics: maps host fds opened for
+// LOCAL.sav / kickass / SL_*.sav so read/write/lseek/close logs can show the
+// path. Guest emulation is single-threaded; no locking (matches existing hooks).
+static std::unordered_map<int, std::string> g_hl5_save_fd_paths;
 
 void Arm32NativeEngine::setup_default_libc_hooks() {
     register_host_hook("memcpy", [this](const std::vector<uint32_t>& args) -> uint32_t {
@@ -395,6 +406,207 @@ void Arm32NativeEngine::setup_default_libc_hooks() {
             write_memory(dst, buf.data(), n);
         }
         return dst;
+    });
+
+    // POSIX Filesystem Hooks for Save/Load Persistence (MC_fsOpen, MC_fsRead, MC_fsWrite, etc.)
+    register_host_hook("stat", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        std::string path = read_string(args[0]);
+        uint32_t stat_buf_ptr = args[1];
+        if (path.empty()) return 0xFFFFFFFF;
+        struct stat st;
+        if (::stat(path.c_str(), &st) != 0) {
+            int e = errno;
+            if (hl5_is_save_path(path)) {
+                HL5_SAVE_LOG("stat path=\"%s\" -> FAIL errno=%d(%s)", path.c_str(), e, strerror(e));
+            }
+            return 0xFFFFFFFF;
+        }
+        if (stat_buf_ptr >= 0x10000) {
+            uint8_t guest_stat[104] = {0};
+            uint32_t st_size_32 = static_cast<uint32_t>(st.st_size);
+            uint32_t st_mtime_32 = static_cast<uint32_t>(st.st_mtime);
+            std::memcpy(guest_stat + 48, &st_size_32, 4);
+            std::memcpy(guest_stat + 80, &st_mtime_32, 4);
+            write_memory(stat_buf_ptr, guest_stat, sizeof(guest_stat));
+        }
+        if (hl5_is_save_path(path)) {
+            HL5_SAVE_LOG("stat path=\"%s\" -> ok size=%lld mtime=%lld", path.c_str(),
+                         (long long)st.st_size, (long long)st.st_mtime);
+        }
+        return 0;
+    });
+
+    register_host_hook("open", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        std::string path = read_string(args[0]);
+        int flags = static_cast<int>(args[1]);
+        mode_t mode = (args.size() > 2 && args[2] != 0) ? static_cast<mode_t>(args[2]) : 0666;
+        if (path.empty()) return 0xFFFFFFFF;
+        int fd = ::open(path.c_str(), flags, mode);
+        LOGI("[FS] open(\"%s\", 0x%x, 0%o) -> fd=%d", path.c_str(), flags, mode, fd);
+        if (hl5_is_save_path(path)) {
+            if (fd >= 0) {
+                g_hl5_save_fd_paths[fd] = path;
+                struct stat st;
+                long long sz = -1;
+                if (::fstat(fd, &st) == 0) sz = (long long)st.st_size;
+                HL5_SAVE_LOG("open path=\"%s\" flags=0x%x mode=0%o -> fd=%d size=%lld",
+                             path.c_str(), flags, mode, fd, sz);
+            } else {
+                int e = errno;
+                HL5_SAVE_LOG("open path=\"%s\" flags=0x%x mode=0%o -> FAIL errno=%d(%s)",
+                             path.c_str(), flags, mode, e, strerror(e));
+            }
+        }
+        return (fd >= 0) ? static_cast<uint32_t>(fd) : 0xFFFFFFFF;
+    });
+
+    register_host_hook("read", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        int fd = static_cast<int>(args[0]);
+        uint32_t buf_ptr = args[1];
+        size_t count = static_cast<size_t>(args[2]);
+        if (fd < 0 || count == 0) return (fd < 0) ? 0xFFFFFFFF : 0;
+        std::vector<uint8_t> tmp(count);
+        ssize_t n = ::read(fd, tmp.data(), count);
+        if (n > 0) {
+            write_memory(buf_ptr, tmp.data(), static_cast<size_t>(n));
+        }
+        auto it = g_hl5_save_fd_paths.find(fd);
+        if (it != g_hl5_save_fd_paths.end()) {
+            if (n >= 0) {
+                HL5_SAVE_LOG("read path=\"%s\" fd=%d req=%u got=%d", it->second.c_str(), fd,
+                             (unsigned)count, (int)n);
+            } else {
+                int e = errno;
+                HL5_SAVE_LOG("read path=\"%s\" fd=%d req=%u -> FAIL errno=%d(%s)",
+                             it->second.c_str(), fd, (unsigned)count, e, strerror(e));
+            }
+        }
+        return (n >= 0) ? static_cast<uint32_t>(n) : 0xFFFFFFFF;
+    });
+
+    register_host_hook("write", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        int fd = static_cast<int>(args[0]);
+        uint32_t buf_ptr = args[1];
+        size_t count = static_cast<size_t>(args[2]);
+        if (fd < 0 || count == 0) return (fd < 0) ? 0xFFFFFFFF : 0;
+        std::vector<uint8_t> tmp(count);
+        if (!read_memory(buf_ptr, tmp.data(), count)) {
+            return 0xFFFFFFFF;
+        }
+        ssize_t n = ::write(fd, tmp.data(), count);
+        if (n > 0) {
+            ::fsync(fd);
+        }
+        auto it = g_hl5_save_fd_paths.find(fd);
+        if (it != g_hl5_save_fd_paths.end()) {
+            if (n >= 0) {
+                HL5_SAVE_LOG("write path=\"%s\" fd=%d req=%u wrote=%d(fsynced)", it->second.c_str(),
+                             fd, (unsigned)count, (int)n);
+            } else {
+                int e = errno;
+                HL5_SAVE_LOG("write path=\"%s\" fd=%d req=%u -> FAIL errno=%d(%s)",
+                             it->second.c_str(), fd, (unsigned)count, e, strerror(e));
+            }
+        }
+        return (n >= 0) ? static_cast<uint32_t>(n) : 0xFFFFFFFF;
+    });
+
+    register_host_hook("lseek", [](const std::vector<uint32_t>& args) -> uint32_t {
+        int fd = static_cast<int>(args[0]);
+        off_t offset = static_cast<int32_t>(args[1]);
+        int whence = static_cast<int>(args[2]);
+        off_t res = ::lseek(fd, offset, whence);
+        auto it = g_hl5_save_fd_paths.find(fd);
+        if (it != g_hl5_save_fd_paths.end()) {
+            if (res >= 0) {
+                HL5_SAVE_LOG("lseek path=\"%s\" fd=%d off=%d whence=%d -> pos=%d",
+                             it->second.c_str(), fd, (int)offset, whence, (int)res);
+            } else {
+                int e = errno;
+                HL5_SAVE_LOG("lseek path=\"%s\" fd=%d off=%d whence=%d -> FAIL errno=%d(%s)",
+                             it->second.c_str(), fd, (int)offset, whence, e, strerror(e));
+            }
+        }
+        return (res >= 0) ? static_cast<uint32_t>(res) : 0xFFFFFFFF;
+    });
+
+    register_host_hook("close", [](const std::vector<uint32_t>& args) -> uint32_t {
+        int fd = static_cast<int>(args[0]);
+        if (fd > 2) {
+            auto it = g_hl5_save_fd_paths.find(fd);
+            uint32_t rc = static_cast<uint32_t>(::close(fd));
+            if (it != g_hl5_save_fd_paths.end()) {
+                if (rc == 0) {
+                    HL5_SAVE_LOG("close path=\"%s\" fd=%d -> ok", it->second.c_str(), fd);
+                } else {
+                    int e = errno;
+                    HL5_SAVE_LOG("close path=\"%s\" fd=%d -> FAIL errno=%d(%s)",
+                                 it->second.c_str(), fd, e, strerror(e));
+                }
+                g_hl5_save_fd_paths.erase(it);
+            }
+            return rc;
+        }
+        return 0;
+    });
+
+    register_host_hook("unlink", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        std::string path = read_string(args[0]);
+        if (path.empty()) return 0xFFFFFFFF;
+        uint32_t rc = static_cast<uint32_t>(::unlink(path.c_str()));
+        if (hl5_is_save_path(path)) {
+            if (rc == 0) {
+                HL5_SAVE_LOG("remove/unlink path=\"%s\" -> ok (note: may be LoadLocal gv+0x29 branch; behavior unchanged)",
+                             path.c_str());
+            } else {
+                int e = errno;
+                HL5_SAVE_LOG("remove/unlink path=\"%s\" -> FAIL errno=%d(%s)", path.c_str(), e,
+                             strerror(e));
+            }
+        }
+        return rc;
+    });
+
+    register_host_hook("rename", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        std::string old_p = read_string(args[0]);
+        std::string new_p = read_string(args[1]);
+        if (old_p.empty() || new_p.empty()) return 0xFFFFFFFF;
+        uint32_t rc = static_cast<uint32_t>(::rename(old_p.c_str(), new_p.c_str()));
+        if (hl5_is_save_path(old_p) || hl5_is_save_path(new_p)) {
+            if (rc == 0) {
+                HL5_SAVE_LOG("rename old=\"%s\" new=\"%s\" -> ok", old_p.c_str(), new_p.c_str());
+            } else {
+                int e = errno;
+                HL5_SAVE_LOG("rename old=\"%s\" new=\"%s\" -> FAIL errno=%d(%s)", old_p.c_str(),
+                             new_p.c_str(), e, strerror(e));
+            }
+        }
+        return rc;
+    });
+
+    register_host_hook("access", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        std::string path = read_string(args[0]);
+        int mode = static_cast<int>(args[1]);
+        if (path.empty()) return 0xFFFFFFFF;
+        uint32_t rc = static_cast<uint32_t>(::access(path.c_str(), mode));
+        if (hl5_is_save_path(path)) {
+            HL5_SAVE_LOG("access path=\"%s\" mode=%d -> %d%s", path.c_str(), mode, (int)rc,
+                         (rc != 0 ? strerror(errno) : "ok"));
+        }
+        return rc;
+    });
+
+    register_host_hook("mkdir", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        std::string path = read_string(args[0]);
+        mode_t mode = (args.size() > 1 && args[1] != 0) ? static_cast<mode_t>(args[1]) : 0777;
+        if (path.empty()) return 0xFFFFFFFF;
+        return static_cast<uint32_t>(::mkdir(path.c_str(), mode));
+    });
+
+    register_host_hook("rmdir", [this](const std::vector<uint32_t>& args) -> uint32_t {
+        std::string path = read_string(args[0]);
+        if (path.empty()) return 0xFFFFFFFF;
+        return static_cast<uint32_t>(::rmdir(path.c_str()));
     });
 }
 

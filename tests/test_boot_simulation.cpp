@@ -8,6 +8,8 @@
 #include <unordered_map>
 #include <sstream>
 #include "arm32_native_engine.h"
+#include <unicorn/arm.h>
+#include "hl5_save_trace.h"
 #include <unordered_set>
 
 static uint64_t g_sim_time_ms = 10000;
@@ -98,7 +100,7 @@ static void setup_jni_bridge() {
             return g_handle_table.allocate(hl5::HandleType::METHOD_ID, nullptr, cls_name, sig + "|" + name);
         });
 
-    auto dispatch_static = [](uint32_t mid_handle, const std::vector<uint32_t>& extra_args) -> std::pair<bool, uint32_t> {
+    auto dispatch_static = [](uint32_t mid_handle, const std::vector<uint32_t>& extra_args) -> std::pair<bool, uint64_t> {
         auto* desc = g_handle_table.find_descriptor(mid_handle);
         if (!desc) return {false, 0};
         std::string combined = desc->signature;
@@ -136,6 +138,17 @@ static void setup_jni_bridge() {
             if (name == "freeMemory") return {true, 64 * 1024 * 1024};
             if (name == "totalMemory") return {true, 128 * 1024 * 1024};
             if (name == "isNetworkAvailable") return {true, 0};
+            if (name == "getAvailableInternalMemorySize" || name == "getAvailableExternalMemorySize") {
+                return {true, 64 * 1024 * 1024};
+            }
+            if (name == "getTotalInternalMemorySize" || name == "getTotalExternalMemorySize") {
+                return {true, 128 * 1024 * 1024};
+            }
+            // Test-only 64-bit ABI sentinel (never invoked by the guest binary).
+            // Known value with nonzero high half to verify R1:R0 propagation.
+            if (name == "testLongSentinel") {
+                return {true, 0x1122334455667788ULL};
+            }
         }
         return {false, 0};
     };
@@ -144,7 +157,7 @@ static void setup_jni_bridge() {
     register_jni_slot(table_vaddr, 0x1D4, "JNIEnv::CallStaticObjectMethod",
         [dispatch_static](const std::vector<uint32_t>& args) -> uint32_t {
             auto [handled, val] = dispatch_static(args[2], {args.begin() + 3, args.end()});
-            return handled ? val : 0;
+            return handled ? static_cast<uint32_t>(val & 0xFFFFFFFFu) : 0;
         });
 
     // CallStaticObjectMethodV (offset 0x1CC)
@@ -158,14 +171,14 @@ static void setup_jni_bridge() {
                 for (int i = 0; i < 8; ++i) va.push_back(buf[i]);
             }
             auto [handled, val] = dispatch_static(args[2], va);
-            return handled ? val : 0;
+            return handled ? static_cast<uint32_t>(val & 0xFFFFFFFFu) : 0;
         });
 
     // CallStaticIntMethod (offset 0x1EC)
     register_jni_slot(table_vaddr, 0x1EC, "JNIEnv::CallStaticIntMethod",
         [dispatch_static](const std::vector<uint32_t>& args) -> uint32_t {
             auto [handled, val] = dispatch_static(args[2], {args.begin() + 3, args.end()});
-            return handled ? val : 0;
+            return handled ? static_cast<uint32_t>(val & 0xFFFFFFFFu) : 0;
         });
 
     // CallStaticIntMethodV (offset 0x208)
@@ -179,10 +192,14 @@ static void setup_jni_bridge() {
                 for (int i = 0; i < 8; ++i) va.push_back(buf[i]);
             }
             auto [handled, val] = dispatch_static(args[2], va);
-            return handled ? val : 0;
+            return handled ? static_cast<uint32_t>(val & 0xFFFFFFFFu) : 0;
         });
 
     // CallStaticLongMethodV (offset 0x214)
+    // ARM EABI jlong return: R0 = low 32, R1 = high 32 (cf. pow hook).
+    // NOTE: CallStaticLongMethod (0x210, non-V) intentionally not registered:
+    // the guest long wrapper (_ZN7_JNIEnv20CallStaticLongMethod at 0x14f878)
+    // always indirects via 0x214, so 0x210 is unused.
     register_jni_slot(table_vaddr, 0x214, "JNIEnv::CallStaticLongMethodV",
         [dispatch_static](const std::vector<uint32_t>& args) -> uint32_t {
             std::vector<uint32_t> va;
@@ -193,7 +210,11 @@ static void setup_jni_bridge() {
                 for (int i = 0; i < 8; ++i) va.push_back(buf[i]);
             }
             auto [handled, val] = dispatch_static(args[2], va);
-            return handled ? val : 0;
+            uint64_t full = handled ? val : 0;
+            uint32_t lo = static_cast<uint32_t>(full & 0xFFFFFFFFu);
+            uint32_t hi = static_cast<uint32_t>((full >> 32) & 0xFFFFFFFFu);
+            uc_reg_write(g_native_engine.uc_, UC_ARM_REG_R1, &hi);
+            return lo;
         });
 
     // CallStaticVoidMethod (offset 0x204)
@@ -415,6 +436,52 @@ int main() {
     setup_jni_bridge();
     std::cout << "[PASS] JNI bridge setup complete: JNIEnv*=0x" << std::hex << g_jnienv32_ptr
               << ", JavaVM*=0x" << g_javavm32_ptr << std::dec << std::endl;
+    // Save/load persistence diagnostics (read-only; stderr on host).
+    Hl5SaveTrace_Install(g_native_engine, g_elf_loader);
+
+    // Focused regression: CallStaticLongMethodV must return R1:R0 (ARM EABI jlong).
+    // Invoke the 0x214 trampoline directly with R1 pre-seeded to garbage; the slot
+    // must overwrite it with the deterministic high half (old code left it stale).
+    {
+        uint32_t jenv_table = 0;
+        g_native_engine.read_memory(g_jnienv32_ptr, &jenv_table, 4);
+        uint32_t longv_tramp = 0;
+        g_native_engine.read_memory(jenv_table + 0x214, &longv_tramp, 4);
+        assert(longv_tramp >= 0x30000000);
+        g_handle_table.push_local_frame();
+        uint32_t cls_h = g_handle_table.allocate(hl5::HandleType::LOCAL_REF, nullptr,
+                                                  "co/kr/eamobile/CletEntry");
+        uint32_t mid_avail = g_handle_table.allocate(hl5::HandleType::METHOD_ID, nullptr,
+                                                      "co/kr/eamobile/CletEntry",
+                                                      std::string("()J|getAvailableInternalMemorySize"));
+        uint32_t garbage = 0xDEADBEEF;
+        uc_reg_write(g_native_engine.uc_, UC_ARM_REG_R1, &garbage);
+        uint32_t lo_avail = g_native_engine.call_function(
+            longv_tramp, {g_jnienv32_ptr, cls_h, mid_avail, 0}, 5000000);
+        uint32_t hi_avail = 0;
+        uc_reg_read(g_native_engine.uc_, UC_ARM_REG_R1, &hi_avail);
+        std::cout << "[+] CallStaticLongMethodV(getAvailableInternalMemorySize) R1:R0 = 0x"
+                  << std::hex << hi_avail << ":" << lo_avail << std::dec << std::endl;
+        assert(lo_avail == 64u * 1024u * 1024u &&
+               "low half must be deterministic 64 MiB");
+        assert(hi_avail == 0u && "high half must be 0, not stale R1 garbage");
+        std::cout << "[PASS] JNI 64-bit return: production stub R1:R0 = 0x0:0x4000000" << std::endl;
+
+        uint32_t mid_sentinel = g_handle_table.allocate(hl5::HandleType::METHOD_ID, nullptr,
+                                                         "co/kr/eamobile/CletEntry",
+                                                         std::string("()J|testLongSentinel"));
+        uc_reg_write(g_native_engine.uc_, UC_ARM_REG_R1, &garbage);
+        uint32_t lo_s = g_native_engine.call_function(
+            longv_tramp, {g_jnienv32_ptr, cls_h, mid_sentinel, 0}, 5000000);
+        uint32_t hi_s = 0;
+        uc_reg_read(g_native_engine.uc_, UC_ARM_REG_R1, &hi_s);
+        std::cout << "[+] CallStaticLongMethodV(testLongSentinel) R1:R0 = 0x"
+                  << std::hex << hi_s << ":" << lo_s << std::dec << std::endl;
+        assert(lo_s == 0x55667788u && "sentinel low half mismatch");
+        assert(hi_s == 0x11223344u && "sentinel high half mismatch");
+        std::cout << "[PASS] JNI 64-bit return: sentinel R1:R0 = 0x11223344:0x55667788" << std::endl;
+        g_handle_table.pop_local_frame();
+    }
 
     // Stage 1: nativeInitKernel
     g_handle_table.push_local_frame();
@@ -467,6 +534,9 @@ int main() {
         reinterpret_cast<void*>(static_cast<uintptr_t>(ext_str_ptr)), ext_dir);
     g_native_engine.call_function(init_fs_sym, {g_jnienv32_ptr, g_thiz_handle, int_str_h, ext_str_h}, 5000000);
     std::cout << "[PASS] Stage 3 nativeInitFileStorage complete" << std::endl;
+    HL5_SAVE_LOG("storage dirs: internal=\"%s\" external=\"%s\"", int_dir.c_str(), ext_dir.c_str());
+    HL5_SAVE_LOG("storage derived: kickass=\"%s/kickass\" local=\"%s/LOCAL.sav\"",
+                 int_dir.c_str(), int_dir.c_str());
     g_handle_table.pop_local_frame();
 
     // Stage 4: nativeInitVFS
@@ -696,6 +766,79 @@ int main() {
     std::cout << "[+] After Class Selection Popup confirmation: active state vtable=0x" << std::hex << game_vt << std::dec << std::endl;
     assert(game_vt == 0x40163860 && "Must transition cleanly into StateGame (0x40163860) after confirming class selection!");
     std::cout << "[PASS] Class Selection Popup verified intact and transitioned into StateGame!" << std::endl;
+    // Save/Load persistence: CommonUi::LoadLocalSaveData restores LOCAL.sav metadata
+    // only; SlotInfo::LoadSlotData(slot) restores the selected slot from the
+    // kickass container (SL_%d.sav via MX_sdSaveData/MX_sdLoadData). Exercise both.
+    uint32_t hero_ptr = 0;
+    g_native_engine.read_memory(game_obj + 5236, &hero_ptr, 4);
+    assert(hero_ptr >= 0x40000000);
+    uint32_t save_all_sym = g_elf_loader.find_symbol("_ZN4HERO7SaveAllEa");
+    uint32_t load_local_sym = g_elf_loader.find_symbol("_ZN8CommonUi17LoadLocalSaveDataEv");
+    uint32_t load_slot_sym = g_elf_loader.find_symbol("_ZN8SlotInfo12LoadSlotDataEa");
+    uint32_t get_class_sym = g_elf_loader.find_symbol("_ZN8SlotInfo12GetHeroClassEv");
+    uint32_t sd_getsize_sym = g_elf_loader.find_symbol("MX_sdGetSize");
+    assert(save_all_sym != 0 && load_local_sym != 0 && load_slot_sym != 0 &&
+           get_class_sym != 0 && sd_getsize_sym != 0);
+    uint32_t slot0_ptr = 0;
+    g_native_engine.read_memory(game_obj + 1300 * 4, &slot0_ptr, 4);
+    assert(slot0_ptr >= 0x40000000);
+    int8_t pre_save_cls = static_cast<int8_t>(g_native_engine.call_function(get_class_sym, {slot0_ptr}));
+    std::cout << "[+] Slot 0 HeroClass before save: class=" << (int)pre_save_cls
+              << " (SlotInfo::Init leaves -1; SaveAll assigns the hero class)" << std::endl;
+
+    // HERO::SaveAll(slot=0) -> SlotInfo::SaveSlotData + SaveHero/Bag (+SaveLocal) + Mission.
+    g_native_engine.call_function(save_all_sym, {hero_ptr, 0}, 10000000);
+    std::cout << "[+] Executed HERO::SaveAll(slot=0) to disk" << std::endl;
+    int8_t saved_cls = static_cast<int8_t>(g_native_engine.call_function(get_class_sym, {slot0_ptr}));
+    std::cout << "[+] Slot 0 HeroClass after save: class=" << (int)saved_cls << std::endl;
+    assert(saved_cls == 0 && "Blocker: SaveAll did not assign Slot 0 to 0 (WARRIOR); no valid save to verify");
+
+    // Host-side artifact check (read-only): LOCAL.sav must be 63 B; kickass must exist.
+    {
+        struct stat st_local;
+        int rc_local = ::stat("/tmp/hl5_int/LOCAL.sav", &st_local);
+        std::cout << "[+] Host artifact LOCAL.sav: rc=" << rc_local
+                  << (rc_local == 0 ? ", size=" + std::to_string(st_local.st_size) : "") << std::endl;
+        assert(rc_local == 0 && st_local.st_size == 63 &&
+               "Blocker: LOCAL.sav missing or wrong size after SaveAll");
+        struct stat st_sd;
+        int rc_sd = ::stat("/tmp/hl5_int/kickass", &st_sd);
+        std::cout << "[+] Host artifact kickass: rc=" << rc_sd
+                  << (rc_sd == 0 ? ", size=" + std::to_string(st_sd.st_size) : "") << std::endl;
+        assert(rc_sd == 0 && st_sd.st_size > 0 &&
+               "Blocker: kickass container missing after SaveAll");
+        uint32_t sl_name = g_native_engine.write_string("SL_0.sav");
+        uint32_t sl_size = g_native_engine.call_function(sd_getsize_sym, {sl_name}, 5000000);
+        std::cout << "[+] MX_sdGetSize(SL_0.sav) = " << (int32_t)sl_size << std::endl;
+        assert((int32_t)sl_size > 16 &&
+               "Blocker: SL_0.sav entry absent in kickass container after SaveAll");
+    }
+
+    // Simulate closing the game: wipe SlotInfo[0]'s hero class in RAM to -1 (empty slot)
+    int8_t empty_cls = -1;
+    g_native_engine.write_memory(slot0_ptr, &empty_cls, 1);
+    int8_t wiped_cls = static_cast<int8_t>(g_native_engine.call_function(get_class_sym, {slot0_ptr}));
+    assert(wiped_cls == -1 && "Slot 0 in RAM must be wiped to -1 before reload");
+
+    // Reload local metadata (does NOT restore slot contents by design).
+    uint32_t common_ui_ptr = 0;
+    g_native_engine.read_memory(game_obj + 5628, &common_ui_ptr, 4);
+    assert(common_ui_ptr >= 0x40000000);
+    g_native_engine.call_function(load_local_sym, {common_ui_ptr}, 10000000);
+    int8_t after_local_cls =
+        static_cast<int8_t>(g_native_engine.call_function(get_class_sym, {slot0_ptr}));
+    std::cout << "[+] After LoadLocalSaveData: Slot 0 class=" << (int)after_local_cls
+              << " (metadata only, slot untouched)" << std::endl;
+
+    // Reload the selected slot from the container and verify the known class.
+    uint32_t load_ret = g_native_engine.call_function(load_slot_sym, {slot0_ptr, 0}, 10000000);
+    std::cout << "[+] SlotInfo::LoadSlotData(0) returned " << (int32_t)load_ret << std::endl;
+    assert((int32_t)load_ret > 0 && "Blocker: LoadSlotData found no SL_0.sav payload to restore");
+
+    int8_t restored_cls = static_cast<int8_t>(g_native_engine.call_function(get_class_sym, {slot0_ptr}));
+    std::cout << "[+] Restored Slot 0 HeroClass from disk after RAM wipe: class=" << (int)restored_cls << std::endl;
+    assert(restored_cls == saved_cls && "Slot 0 HeroClass must be restored from persistent slot save!");
+    std::cout << "[PASS] Persistent Disk Save/Load verified across simulated app restart!" << std::endl;
 
     std::cout << "\n[PASS] Reached Original Title Screen (State 3) in Native C++ on AArch64!" << std::endl;
     return 0;

@@ -1,0 +1,26 @@
+# Normalize line endings and mark binaries for clean diffs.
+* text=auto
+
+# Source and docs stay diffable as text.
+*.cpp text diff=cpp
+*.h text diff=cpp
+*.java text diff=java
+*.py text diff=python
+*.sh text eol=lf
+*.md text
+*.json text
+*.xml text
+
+# Binaries: no diff, no line-ending conversion.
+*.so binary
+*.a binary
+*.dex binary
+*.apk binary
+*.mp3 binary
+*.png binary
+*.keystore binary
+*.jks binary
+*.idsig binary
+
+# Vendored third-party code excluded from language stats.
+android/app/src/main/cpp/third_party/** linguist-vendored

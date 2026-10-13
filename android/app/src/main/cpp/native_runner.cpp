@@ -6,6 +6,8 @@
 #include "vfs_adapter.h"
 #include "arm32_native_engine.h"
 #include "arm32_elf_loader.h"
+#include <unicorn/arm.h>
+#include "hl5_save_trace.h"
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -182,8 +184,10 @@ void setup_jni_bridge() {
             return g_handle_table.allocate(hl5::HandleType::METHOD_ID, nullptr, cls_name, sig + "|" + name);
         });
 
-    // Helper lambda to resolve a method key and dispatch to built-in handlers
-    auto dispatch_static = [](uint32_t mid_handle, const std::vector<uint32_t>& extra_args) -> std::pair<bool, uint32_t> {
+    // Helper lambda to resolve a method key and dispatch to built-in handlers.
+    // Returns a full 64-bit value so jlong stubs can propagate R1:R0 (ARM EABI).
+    // 32-bit int slots truncate to the low word; the long slot splits (cf. pow hook).
+    auto dispatch_static = [](uint32_t mid_handle, const std::vector<uint32_t>& extra_args) -> std::pair<bool, uint64_t> {
         auto* desc = g_handle_table.find_descriptor(mid_handle);
         if (!desc) return {false, 0};
         // desc->signature format: "sig|name", desc->class_name = class
@@ -227,6 +231,12 @@ void setup_jni_bridge() {
             if (name == "freeMemory") return {true, 64 * 1024 * 1024};
             if (name == "totalMemory") return {true, 128 * 1024 * 1024};
             if (name == "isNetworkAvailable") return {true, 0};
+            if (name == "getAvailableInternalMemorySize" || name == "getAvailableExternalMemorySize") {
+                return {true, 64 * 1024 * 1024};
+            }
+            if (name == "getTotalInternalMemorySize" || name == "getTotalExternalMemorySize") {
+                return {true, 128 * 1024 * 1024};
+            }
             // Audio Bridge: Music (MediaPlayer) & Sound Effects (SoundPool)
             // Note: In ARM EABI variadic JNI calls (_JNIEnv::CallStaticIntMethod(env, cls, mid, ...)),
             // r0=env, r1=cls, r2=mid, and r3 is pushed into extra_args[0] as 8-byte alignment padding
@@ -374,7 +384,7 @@ void setup_jni_bridge() {
     register_jni_slot(table_vaddr, 0x1D4, "JNIEnv::CallStaticObjectMethod",
         [dispatch_static](const std::vector<uint32_t>& args) -> uint32_t {
             auto [handled, val] = dispatch_static(args[2], {args.begin() + 3, args.end()});
-            return handled ? val : 0;
+            return handled ? static_cast<uint32_t>(val & 0xFFFFFFFFu) : 0;
         });
 
     // CallStaticObjectMethodV (offset 0x1CC) — va_list variant used by nativeInitKernel
@@ -389,14 +399,14 @@ void setup_jni_bridge() {
                 for (int i = 0; i < 8; ++i) va.push_back(buf[i]);
             }
             auto [handled, val] = dispatch_static(args[2], va);
-            return handled ? val : 0;
+            return handled ? static_cast<uint32_t>(val & 0xFFFFFFFFu) : 0;
         });
 
     // CallStaticIntMethod (offset 0x1EC)
     register_jni_slot(table_vaddr, 0x1EC, "JNIEnv::CallStaticIntMethod",
         [dispatch_static](const std::vector<uint32_t>& args) -> uint32_t {
             auto [handled, val] = dispatch_static(args[2], {args.begin() + 3, args.end()});
-            return handled ? val : 0;
+            return handled ? static_cast<uint32_t>(val & 0xFFFFFFFFu) : 0;
         });
 
     // CallStaticIntMethodV (offset 0x208) — va_list variant
@@ -410,10 +420,16 @@ void setup_jni_bridge() {
                 for (int i = 0; i < 8; ++i) va.push_back(buf[i]);
             }
             auto [handled, val] = dispatch_static(args[2], va);
-            return handled ? val : 0;
+            return handled ? static_cast<uint32_t>(val & 0xFFFFFFFFu) : 0;
         });
 
     // CallStaticLongMethodV (offset 0x214)
+    // ARM EABI jlong return: R0 = low 32, R1 = high 32 (cf. pow hook).
+    // The generic trampoline only writes R0 from our return value, so publish
+    // the high half explicitly here; return the low half.
+    // NOTE: CallStaticLongMethod (0x210, non-V) intentionally not registered:
+    // the guest long wrapper (_ZN7_JNIEnv20CallStaticLongMethod at 0x14f878)
+    // always indirects via 0x214, so 0x210 is unused.
     register_jni_slot(table_vaddr, 0x214, "JNIEnv::CallStaticLongMethodV",
         [dispatch_static](const std::vector<uint32_t>& args) -> uint32_t {
             std::vector<uint32_t> va;
@@ -424,7 +440,11 @@ void setup_jni_bridge() {
                 for (int i = 0; i < 8; ++i) va.push_back(buf[i]);
             }
             auto [handled, val] = dispatch_static(args[2], va);
-            return handled ? val : 0;
+            uint64_t full = handled ? val : 0;
+            uint32_t lo = static_cast<uint32_t>(full & 0xFFFFFFFFu);
+            uint32_t hi = static_cast<uint32_t>((full >> 32) & 0xFFFFFFFFu);
+            uc_reg_write(g_native_engine.uc_, UC_ARM_REG_R1, &hi);
+            return lo;
         });
 
     // CallStaticVoidMethod (offset 0x204)
@@ -817,6 +837,10 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnSurfaceCreated(
         return;
     }
 
+    // Save/load persistence diagnostics (read-only guest tracepoints + storage
+    // path log). No guest behavior changed.
+    Hl5SaveTrace_Install(g_native_engine, g_elf_loader);
+
     // 5. Build JNI bridge vtable in guest memory
     LOGI("[MILESTONE 5/9] Setting up JNI bridge vtable");
     setup_jni_bridge();
@@ -895,6 +919,11 @@ Java_co_kr_eamobile_hl5_runner_MainActivity_nativeOnSurfaceCreated(
             LOGI("[BOOT 3/7] nativeInitFileStorage at 0x%08x (int=%s, ext=%s)", init_fs_sym, int_dir.c_str(), ext_dir.c_str());
             g_native_engine.call_function(init_fs_sym, {g_jnienv32_ptr, g_thiz_handle, int_str_h, ext_str_h}, 5000000);
             LOGI("[BOOT 3/7] nativeInitFileStorage complete");
+            // Persistence anchor: log resolved storage dirs + derived save paths.
+            // Compare across process restarts to confirm path stability.
+            HL5_SAVE_LOG("storage dirs: internal=\"%s\" external=\"%s\"", int_dir.c_str(), ext_dir.c_str());
+            HL5_SAVE_LOG("storage derived: kickass=\"%s/kickass\" local=\"%s/LOCAL.sav\"",
+                         int_dir.c_str(), int_dir.c_str());
         }
         g_handle_table.pop_local_frame();
 
